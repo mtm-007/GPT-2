@@ -2,19 +2,20 @@
 import torch, math
 import torch.nn as nn
 from torch.nn import functional as F
+import matplotlib.pyplot as plt
 
 
 #hyperparameters
 batch_size= 64
-block_size = 256
-max_iters = 5000
+block_size = 128
+max_iters = 50000
 eval_iterval = 500
-learning_rate = 3e-4
+lr = 3e-4     # learning_rate
 device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_emb = 384
-n_layer = 6
-n_head = 6
+n_emb = 128
+n_layer = 4
+n_head = 4
 dropout = 0.2
 
 #-------
@@ -39,6 +40,12 @@ decoder = lambda l: ''.join([itos[i] for i in l]) # decoder takes intergers and 
 data = torch.tensor(encode(text), dtype = torch.long)
 # lets split our dataset in to train and validatioin set
 n = int(0.9*len(text)) # the first 90% will be for training and 10% for validation
+#-----------------------
+# sampling a very small dataset for a sanity check and overfitting on a very small data 
+#n_over, n_val= int(0.01*len(data)),int(0.005*len(data))
+# train_data = data[:n_over]
+# val_data = data[n_over:n_over+n_val]
+#-----------------------
 train_data = data[:n]
 val_data = data[n:]
 
@@ -187,9 +194,11 @@ class BigramLanguageModel(nn.Module):
     
 model = BigramLanguageModel()
 m = model.to(device)
+print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
+#parameters = [p for layer in m.layers for p in layer.parameters()]
 
-optimizer = torch.optim.AdamW(model.parameters(), lr= learning_rate)
-
+optimizer = torch.optim.AdamW(model.parameters(), lr= lr)
+lossi = []
 for iter in range(max_iters): 
     if iter % eval_iterval == 0:
         losses = estimate_loss()
@@ -199,9 +208,15 @@ for iter in range(max_iters):
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    lr =  lr if max_iters < 10000 else lr*10    #step learing rate Decay 
     optimizer.step()
+    
+    #tracking_Stats
+    lossi.append(loss.log10().item())
+    
 
 context = torch.zeros((1,1), dtype=torch.long, device= device)
 print(decoder(m.generate(context, max_tokens=500)[0].tolist()))
+plt.plot(torch.tensor(lossi).view(-1, 1000).mean(1))
 
 
