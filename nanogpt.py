@@ -7,15 +7,15 @@ import matplotlib.pyplot as plt
 
 #hyperparameters
 batch_size= 64
-block_size = 128
-max_iters = 50000
+block_size = 256
+max_iters = 5000
 eval_iterval = 500
-lr = 3e-4     # learning_rate
+learning_rate = 3e-4
 device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_emb = 128
-n_layer = 4
-n_head = 4
+n_emb = 384
+n_layer = 6
+n_head = 6
 dropout = 0.2
 
 #-------
@@ -194,8 +194,6 @@ class BigramLanguageModel(nn.Module):
     
 model = BigramLanguageModel()
 m = model.to(device)
-print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
-#parameters = [p for layer in m.layers for p in layer.parameters()]
 
 optimizer = torch.optim.AdamW(model.parameters(), lr= lr)
 lossi = []
@@ -210,13 +208,8 @@ for iter in range(max_iters):
     loss.backward()
     lr =  lr if max_iters < 10000 else lr*10    #step learing rate Decay 
     optimizer.step()
-    
-    #tracking_Stats
-    lossi.append(loss.log10().item())
-    
 
 context = torch.zeros((1,1), dtype=torch.long, device= device)
 print(decoder(m.generate(context, max_tokens=500)[0].tolist()))
-plt.plot(torch.tensor(lossi).view(-1, 1000).mean(1))
 
 
