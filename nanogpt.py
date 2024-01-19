@@ -2,21 +2,22 @@
 import torch, math
 import torch.nn as nn
 from torch.nn import functional as F
+from pathlib import Path
 import matplotlib.pyplot as plt
 
 
 #hyperparameters
 batch_size= 64
-block_size = 256
-max_iters = 5000
-eval_iterval = 500
-learning_rate = 3e-4
+block_size = 128
+max_iters = 20000
+eval_iterval = 1000
+lr = 6e-5
 device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_emb = 384
-n_layer = 6
-n_head = 6
-dropout = 0.2
+n_emb = 128
+n_layer = 4
+n_head = 4
+dropout = 0.1
 
 #-------
 torch.manual_seed(1337)
@@ -195,6 +196,8 @@ class BigramLanguageModel(nn.Module):
 model = BigramLanguageModel()
 m = model.to(device)
 
+print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
+
 optimizer = torch.optim.AdamW(model.parameters(), lr= lr)
 lossi = []
 for iter in range(max_iters): 
@@ -206,10 +209,15 @@ for iter in range(max_iters):
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
-    lr =  lr if max_iters < 10000 else lr*10    #step learing rate Decay 
+    lr =  lr #if max_iters < 1500 else lr/10    #step learing rate Decay 
     optimizer.step()
 
 context = torch.zeros((1,1), dtype=torch.long, device= device)
 print(decoder(m.generate(context, max_tokens=500)[0].tolist()))
-
+#------
+# step 19000: train loss 1.6894, val loss 1.8373 with 20,000 iterations
+#------
+# mdl_path = Path('models')
+# mdl_path.mkdir(exist_ok=True)
+# torch.save(model, mdl_path/'nanoGpt_0.2M_para.pkl')
 
