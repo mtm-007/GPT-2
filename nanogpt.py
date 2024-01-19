@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 #hyperparameters
 batch_size= 64
 block_size = 128
-max_iters = 20000
+max_iters = 75001
 eval_iterval = 1000
-lr = 6e-5
+lr = 9e-5
 device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_emb = 128
@@ -216,8 +216,10 @@ context = torch.zeros((1,1), dtype=torch.long, device= device)
 print(decoder(m.generate(context, max_tokens=500)[0].tolist()))
 #------
 # step 19000: train loss 1.6894, val loss 1.8373 with 20,000 iterations
+# step 65000: train loss 1.4269, val loss 1.6255 with lr = 6e-5
+# step 65000: train loss 1.3690, val loss 1.5782 with lr = 8e-5
 #------
-# mdl_path = Path('models')
-# mdl_path.mkdir(exist_ok=True)
-# torch.save(model, mdl_path/'nanoGpt_0.2M_para.pkl')
+mdl_path = Path('models')
+mdl_path.mkdir(exist_ok=True)
+torch.save(model, mdl_path/'nanoGpt_0.82M_para_1.55_val.pkl')
 
