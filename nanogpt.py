@@ -8,13 +8,13 @@ import matplotlib.pyplot as plt
 
 #hyperparameters
 batch_size= 64
-block_size = 128
-max_iters = 75001
+block_size = 256
+max_iters = 50001
 eval_iterval = 1000
 lr = 9e-5
 device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_emb = 128
+n_emb = 512
 n_layer = 4
 n_head = 4
 dropout = 0.1
@@ -149,7 +149,7 @@ class Block(nn.Module):
         return x
 
 
-class BigramLanguageModel(nn.Module):
+class NanoGptModel(nn.Module):
     #def __init__(self, vocab_size):
     def __init__(self):
         super().__init__()
@@ -193,7 +193,7 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, id_next), dim = 1) # (B, T+1)
         return idx
     
-model = BigramLanguageModel()
+model = NanoGptModel()
 m = model.to(device)
 
 print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
@@ -214,12 +214,8 @@ for iter in range(max_iters):
 
 context = torch.zeros((1,1), dtype=torch.long, device= device)
 print(decoder(m.generate(context, max_tokens=500)[0].tolist()))
-#------
-# step 19000: train loss 1.6894, val loss 1.8373 with 20,000 iterations
-# step 65000: train loss 1.4269, val loss 1.6255 with lr = 6e-5
-# step 65000: train loss 1.3690, val loss 1.5782 with lr = 8e-5
-#------
+
 mdl_path = Path('models')
 mdl_path.mkdir(exist_ok=True)
-torch.save(model, mdl_path/'nanoGpt_0.82M_para_1.55_val.pkl')
+torch.save(model, mdl_path/'nanoGpt_12.8M_para.pkl')
 
