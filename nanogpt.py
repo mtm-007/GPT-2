@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 
 #hyperparameters
 batch_size= 64
-block_size = 256
-max_iters = 50001
+block_size = 128
+max_iters = 30001
 eval_iterval = 1000
 lr = 9e-5
 device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -209,7 +209,7 @@ for iter in range(max_iters):
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
-    lr =  lr #if max_iters < 1500 else lr/10    #step learing rate Decay 
+    lr =  lr if max_iters > 20000 else lr*10    #step learing rate Decay 
     optimizer.step()
 
 context = torch.zeros((1,1), dtype=torch.long, device= device)
