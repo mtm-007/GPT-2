@@ -1,80 +1,12 @@
-
 import torch, math
 import torch.nn as nn
 from torch.nn import functional as F
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-import wandb
-wandb.login()
-
-
-#hyperparameters
-batch_size= 32
-block_size = 1024
-max_iters = 1001
-eval_iterval = 200
-lr = 6e-4
-device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
-n_emb = 768
-n_layer = 6
-n_head = 6
-dropout = 0.1
-
-#-------
 torch.manual_seed(1337)
 
 
-# We always start with a dataset to train on. Let's download the tiny shakespeare dataset
-#!wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-
-with open('input.txt', 'r', encoding='utf-8') as f:
-    text = f.read()
-
-
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
-
-stoi = {ch:i for i,ch in enumerate(chars)}
-itos = {i:ch for i,ch in enumerate(chars)}
-encode = lambda s: [stoi[c] for c in s] # encoder takes a string and outputs list of intergers
-decoder = lambda l: ''.join([itos[i] for i in l]) # decoder takes intergers and outputs a strings
-
-data = torch.tensor(encode(text), dtype = torch.long)
-# lets split our dataset in to train and validatioin set
-n = int(0.9*len(text)) # the first 90% will be for training and 10% for validation
-#-----------------------
-# sampling a very small dataset for a sanity check and overfitting on a very small data 
-#n_over, n_val= int(0.01*len(data)),int(0.005*len(data))
-# train_data = data[:n_over]
-# val_data = data[n_over:n_over+n_val]
-#-----------------------
-train_data = data[:n]
-val_data = data[n:]
-
-#dataloading
-def get_batch(split):
-    data = train_data if split=='train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x,y
-
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
 
 
 class Head(nn.Module):
@@ -195,56 +127,4 @@ class NanoGptModel(nn.Module):
             id_next = torch.multinomial(probs, num_samples=1)# (B, C)
             idx = torch.cat((idx, id_next), dim = 1) # (B, T+1)
         return idx
-
-
-# wandb tracking initialization
-wandb.init(project = 'nano-gpt-tracking-test',
-      config={
-            "batch_size" :32,
-            "block_size" : 1024,
-            "max_iters" :1001,
-            "eval_iterval" : 200,
-            "lr" : 6e-4,
-            "eval_iters" : 200,
-            "n_emb" : 768,
-            "n_layer" : 6,
-            "n_head" :6,
-            "dropout" : 0.1,
-}
-)
-
-model = NanoGptModel().to(device)
-
-#torch compile
-m = torch.compile(model)
-
-#wandb watch
-wandb.watch(m)
-
-print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
-
-optimizer = torch.optim.AdamW(model.parameters(), lr= lr)
-lossi = []
-for iter in range(max_iters): 
-    if iter % eval_iterval == 0:
-        losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        
-        #wandb log
-        wandb.log({"train_loss": losses["train"], "val_loss": losses["val"]})
-
-    xb,yb = get_batch('train')
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    lr =  lr if max_iters > 20000 else lr*10    #step learing rate Decay 
-    optimizer.step()
-
-
-context = torch.zeros((1,1), dtype=torch.long, device= device)
-print(decoder(m.generate(context, max_tokens=500)[0].tolist()))
-
-mdl_path = Path('models')
-mdl_path.mkdir(exist_ok=True)
-torch.save(model, mdl_path/'nanoGpt_12.8M_para.pkl')
 
