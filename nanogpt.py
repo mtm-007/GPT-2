@@ -14,7 +14,7 @@ batch_size= 32
 block_size = 1024
 max_iters = 1001
 eval_iterval = 200
-lr = 6e-4
+lr = 3e-4
 device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_emb = 768
@@ -22,11 +22,12 @@ n_layer = 6
 n_head = 6
 dropout = 0.1
 
+dtype = torch.long # 'bfloat16' # 'float32' or 'bfloat16'
 #-------
 torch.manual_seed(1337)
 
 
-# We always start with a dataset to train on. Let's download the tiny shakespeare dataset
+# dataset to train on. Let's download the tiny shakespeare dataset
 #!wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
 with open('input.txt', 'r', encoding='utf-8') as f:
@@ -41,8 +42,8 @@ itos = {i:ch for i,ch in enumerate(chars)}
 encode = lambda s: [stoi[c] for c in s] # encoder takes a string and outputs list of intergers
 decoder = lambda l: ''.join([itos[i] for i in l]) # decoder takes intergers and outputs a strings
 
-data = torch.tensor(encode(text), dtype = torch.long)
-# lets split our dataset in to train and validatioin set
+data = torch.tensor(encode(text), dtype = dtype)
+# split our dataset in to train and validatioin set
 n = int(0.9*len(text)) # the first 90% will be for training and 10% for validation
 #-----------------------
 # sampling a very small dataset for a sanity check and overfitting on a very small data 
@@ -53,7 +54,7 @@ n = int(0.9*len(text)) # the first 90% will be for training and 10% for validati
 train_data = data[:n]
 val_data = data[n:]
 
-#dataloading
+#dataloader
 def get_batch(split):
     data = train_data if split=='train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
@@ -119,7 +120,7 @@ class Multi_head_attention(nn.Module):
         out = self.dropout(self.proj(out))
         return out
     
-
+# aka MLP model
 class FeedForward(nn.Module):
     """ simple linear layer followed by non-linearity """
 
@@ -204,12 +205,13 @@ wandb.init(project = 'nano-gpt-tracking-test',
             "block_size" : 1024,
             "max_iters" :1001,
             "eval_iterval" : 200,
-            "lr" : 6e-4,
+            "lr" : 3e-4,
             "eval_iters" : 200,
             "n_emb" : 768,
             "n_layer" : 6,
             "n_head" :6,
             "dropout" : 0.1,
+            #"dtype" : 'bfloat16' didnt work yet need some debugging,
 }
 )
 
@@ -231,7 +233,7 @@ for iter in range(max_iters):
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         
         #wandb log
-        wandb.log({"train_loss": losses["train"], "val_loss": losses["val"]})
+        wandb.log({"steps": iter,"train_loss": losses["train"], "val_loss": losses["val"]})
 
     xb,yb = get_batch('train')
     logits, loss = model(xb, yb)
@@ -240,11 +242,14 @@ for iter in range(max_iters):
     lr =  lr if max_iters > 20000 else lr*10    #step learing rate Decay 
     optimizer.step()
 
+    # Free up unoccupied cached memory
+    torch.cuda.empty_cache()
 
-context = torch.zeros((1,1), dtype=torch.long, device= device)
+
+context = torch.zeros((1,1), dtype=dtype, device= device)
 print(decoder(m.generate(context, max_tokens=500)[0].tolist()))
 
-mdl_path = Path('models')
-mdl_path.mkdir(exist_ok=True)
-torch.save(model, mdl_path/'nanoGpt_12.8M_para.pkl')
+# mdl_path = Path('models')
+# mdl_path.mkdir(exist_ok=True)
+# torch.save(model, mdl_path/'nanoGpt_12.8M_para.pkl')
 
