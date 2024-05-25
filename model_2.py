@@ -1,3 +1,8 @@
+'''
+This is the whole Transformers architecture both encoder plus decoder just like the paper
+
+'''
+
 import torch
 import torch.nn as nn
 import math 
@@ -60,7 +65,23 @@ class LayerNormalization(nn.Module):
         std = x.std(dim =-1, keepdim= True)
         return self.alpha * (x - mean)/(std + self.eps) + self.bias # apply the formula
     
-
+"""" 
+d_ff in Detail
+d_ff is the size of the hidden layer in the feed-forward network.
+It is the dimensionality of the intermediate representation after the first linear transformation and before applying the ReLU activation.
+****
+d_model: The dimensionality of input and output vectors (commonly 512 or 1024).
+d_ff: The dimensionality of the inner feed-forward layer (commonly 2048).
+- d_model is 512, d_ff is set to 2048 in the Transformer architecture. This means that within each feed-forward network, 
+the input vector of size 512 is transformed into an intermediate representation of size 2048, 
+then passed through a ReLU activation, and finally projected back to a 512-dimensional space.
+Importance of d_ff
+The value of d_ff determines the capacity of the feed-forward network to model complex relationships.
+A larger d_ff means more parameters and potentially more expressive power,
+a crucial role in determining the model's capacity and is typically set to a value 
+significantly larger than d_model to allow for richer representations.
+ at the cost of increased computational requirements.
+"""
 class FeedForwardBlock(nn.Module):
 
     def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
@@ -103,7 +124,7 @@ class MultiHeadAttentionBlock(nn.Module):
 
         if dropout is not None:
             attention_scores = dropout(attention_scores)
-
+        #this attention score going to be used for visualizing 
         return (attention_scores @ value), attention_scores
 
     def forward(self, q, k, v, mask):
@@ -165,7 +186,7 @@ class Encoder(nn.Module):
         return self.norm(x)
     
 
-class Decoder(nn.Module):
+class DecoderBlock(nn.Module):
 
     def __init__(self, self_attention_block: MultiHeadAttentionBlock, cross_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
         super().__init__()
@@ -193,8 +214,8 @@ class Decoder(nn.Module):
             x = layers(x, encoder_output, enc_mask, dec_mask)
         return self.norm(x)
     
-
-class ProjectionLayer(nn.Module):
+# the Head/projection layer - linear head layer with softmax
+class HeaderLayer(nn.Module):
 
     def __init__(self, d_model: int, vocab_size:int) -> None:
         super().__init__()
@@ -203,3 +224,76 @@ class ProjectionLayer(nn.Module):
     def forward(self, x):
         # (batch, seq_len, d_model) --> (batch, seq_len, vocab_size)
         return torch.log_softmax(self.proj(x), dim=-1)
+
+
+class Transformer(nn.Module):
+
+    def __init__(self, encoder: Encoder, decoder: Decoder, enc_embed: InputEmbeddings, dec_embed: InputEmbeddings, enc_pos: PositionalEncoding, dec_pos: PositionalEncoding, Header_layer: HeaderLayer) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.enc_embed = enc_embed
+        self.dec_embed = dec_embed
+        self.enc_pos = enc_pos
+        self.dec_pos = dec_pos
+        self.Header_layer = Header_layer
+
+    def encode(self, src, enc_mask):
+        #src is the source data or file
+        src = self.enc_embed(src) # apply the encoder embedding on the source data
+        src = self.enc_pos(src) # add the positional encoding
+        return self.encoder(src, enc_mask)
+    
+    def decode(self, encoder_output, enc_mask, trgt, dec_mask):
+        trgt = self.dec_embed(trgt)
+        trgt = self.dec_pos(trgt)
+        return self.decoder(trgt, encoder_output, enc_mask, dec_mask)
+    
+    def projection(self, x):
+        return self.Header_layer(x)
+    
+# the enc_seq_len represents the source Language and the dec_seq_len represents the target language, they can be the same or different (i.e for different language translation)
+# d_model size is 512 here according with the paper but can changed easily,
+def build_transform(src_vocab_size: int, trgt_vocab_size: int, enc_seq_len: int, dec_seq_len: int, d_model: int = 512, N: int = 6, n_head: int= 8, dropout: float= 0.01, d_ff: int = 2048) -> Transformers:
+    #create the embedding layers
+    enc_embed = InputEmbeddings(d_model, src_vocab_size)
+    dec_embed = InputEmbeddings(d_model, trgt_vocab_size)
+
+    #create the positional embedding
+    enc_pos = PositionalEncoding(d_model, src_vocab_size, dropout)
+    dec_pos = PositionalEncoding(d_model, trgt_vocab_size, dropout)
+
+    #create the encoder blocks
+    encoder_blocks = []
+    for _ in range(N):
+        encoder_self_attention_block = MultiHeadAttentionBlock(d_model, n_head, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff,dropout)
+        encoder_block = EncoderBlock(encoder_self_attention_block, feed_forward_block, dropout)
+        encoder_blocks.append(encoder_block) 
+    #create the decoder blocks
+    decoder_blocks = []
+    for _ in range(N):
+        decoder_self_attention_block = MultiHeadAttentionBlock(d_model, n_head, dropout)
+        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, n_head, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        Decoder_block = DecoderBlock(encoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
+        decoder_blocks.append(Decoder_block)
+
+    #create the encoder and decoder
+    encoder = Encoder(nn.ModuleList(encoder_blocks))
+    decoder = Decoder(nn.ModuleList(decoder_blocks))
+
+    #create the projection layer or header layer
+    Header_layer = HeaderLayer(d_model, trgt_vocab_size)
+
+    #create the transformer
+    Transformer = Transformer(encoder, decoder, enc_embed, dec_embed, enc_pos, dec_pos, Header_layer)
+
+    #initialize the parameters
+    for p in Transformer.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_normal_(p)
+
+    return Transformer
+
+    
