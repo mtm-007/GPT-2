@@ -10,6 +10,8 @@ from tokenizers.trainers import WordLevelTrainer
 
 from pathlib import Path
 
+from dataset import BilingualDataset, casual_mask
+
 def get_all_sentence(ds, lang):
     for item in ds:
         yield item['translation'][lang]
@@ -39,3 +41,6 @@ def get_ds(config):
     train_ds_size = len(0.9 * len(ds_raw))
     val_ds_size = len(ds_raw) - train_ds_size
     train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size]) 
+
+    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_trg, config["lang_src"], config["lang_trg"], config["seq_len"])
+    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_trg, config["lang_src"], config["lang_trg"], config["seq_len"])

@@ -38,3 +38,50 @@ class BilingualDataset(Dataset):
         if enc_num_padding_tokens < 0 or dec_num_padding_tokens < 0:
             #the padding shouldnt be negative
             raise ValueError('Sentence is too long') 
+        
+        #add sos, eos and padding tokens to the encoder input text
+        encoder_input = torch.cat(
+            [
+                self.sos_token,
+                torch.tensor(self.enc_input_tokens, dtype= torch.int64),
+                self.eos_token,
+                torch.tensor([self.pad_token] * enc_num_padding_tokens, dtype= torch.int64)
+            ]
+        )
+        
+        #only adding sos and padding for decoder input
+        decoder_input = torch.cat(
+            [
+                self.sos_token,
+                torch.tensor(dec_input_tokens, dtype= torch.int64),
+                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype= torch.int64)
+            ]
+        )
+
+        # add eos and padding when needed
+        label_output = torch.cat(
+            [
+                torch.tensor(dec_input_tokens, dtype= torch.int64),
+                self.eos_token,
+                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype= torch.int64)
+            ]
+        )
+
+        assert encoder_input.size(0) == self.seq_len
+        assert decoder_input.size(0) == self.seq_len
+        assert label_output.size(0) == self.seq_len
+
+        return {
+            "encoder_input": enc_input_tokens, #(seq_len)
+            "decoder_input": dec_input_tokens, #(seq_len)
+            "encoder_mask": (enc_input_tokens != self.pad_token).unsqueeze(0).unsqueeze(0).int(), # (1,1,seq_len)
+            # the decoder mask takes input as seq_len but since we asserted decoder & encdoer to have upto seq_len size we can use their size instead
+            "decoder_mask": (dec_input_tokens != self.pad_token).unsqueeze(0).unsqueeze(0).int() & casual_mask(decoder_input.size(0)),
+            "label_output": label_output, # (seq_len)
+            "src_text": src_text,
+            "trg_text": trg_text,
+        }
+    
+def casual_mask(size):
+    mask = torch.triu(torch.ones(1, size, size), diagonal=1).type(torch.int)
+    return mask == 0
