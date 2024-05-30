@@ -10,7 +10,8 @@ from tokenizers.trainers import WordLevelTrainer
 
 from pathlib import Path
 
-from dataset import BilingualDataset, casual_mask
+from dataset_ft import BilingualDataset, casual_mask
+from model_2 import build_transformer
 
 def get_all_sentence(ds, lang):
     for item in ds:
@@ -44,3 +45,33 @@ def get_ds(config):
 
     train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_trg, config["lang_src"], config["lang_trg"], config["seq_len"])
     val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_trg, config["lang_src"], config["lang_trg"], config["seq_len"])
+
+    max_len_src = 0
+    max_len_trg = 0
+
+    for item in ds_raw:
+        src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids 
+        trg_ids = tokenizer_src.encode(item['translation'][config['lang_trg']]).ids 
+        max_len_src = max(max_len_src, len(src_ids))
+        max_len_trg = max(max(max_len_trg, len(trg_ids)))
+
+    print(f"Max length of the source sentence {max_len_src}")
+    print(f"Max length of the target sentence {max_len_trg}")
+
+    train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
+    valid_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
+
+    return train_dataloader, valid_dataloader, tokenizer_src, tokenizer_trg
+
+def get_model(config, src_vocab_size, trgt_vocab_size):
+    #for limited GPU resource reduce the n_head, number of layers
+    model = build_transformer(src_vocab_size, trgt_vocab_size, config['seq_len'], config['seq_len'], config['d_model'])
+    return model
+
+def train_model(config):
+    #Define the device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"training with {device}")
+
+    Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
+    
