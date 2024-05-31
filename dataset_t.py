@@ -12,6 +12,7 @@ class BilingualDataset(Dataset):
         self.tokenizer_trg = tokenizer_trg
         self.src_lang = src_lang
         self.trg_lang = trg_lang
+        self.seq_len = seq_len
 
         #get tensor id for the special tokens
         self.sos_token = torch.Tensor([tokenizer_src.token_to_id(['[SOS]'])], dtype= torch.int64)
