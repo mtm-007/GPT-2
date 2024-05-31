@@ -27,7 +27,7 @@ class BilingualDataset(Dataset):
         src_text = src_target_pair['translation'][self.src_lang]
         trg_text = src_target_pair['translation'][self.src_lang]
 
-        enc_input_tokens = self.tokenizer_src.encdoe(src_text).ids
+        enc_input_tokens = self.tokenizer_src.encode(src_text).ids
         dec_input_tokens = self.tokenizer_trg.encode(trg_text).ids
 
         enc_num_padding_tokens = self.seq_len - len(enc_input_tokens) - 2
@@ -44,7 +44,7 @@ class BilingualDataset(Dataset):
         encoder_input = torch.cat(
             [
                 self.sos_token,
-                torch.tensor(self.enc_input_tokens, dtype= torch.int64),
+                torch.tensor(enc_input_tokens, dtype= torch.int64),
                 self.eos_token,
                 torch.tensor([self.pad_token] * enc_num_padding_tokens, dtype= torch.int64)
             ]

@@ -287,13 +287,13 @@ def build_transformer(src_vocab_size: int, trgt_vocab_size: int, enc_seq_len: in
     Header_layer = HeaderLayer(d_model, trgt_vocab_size)
 
     #create the transformer
-    Transformer = Transformer(encoder, decoder, enc_embed, dec_embed, enc_pos, dec_pos, Header_layer)
+    transformer_instance = Transformer(encoder, decoder, enc_embed, dec_embed, enc_pos, dec_pos, Header_layer)
 
     #initialize the parameters
-    for p in Transformer.parameters():
+    for p in transformer_instance.parameters():
         if p.dim() > 1:
             nn.init.xavier_normal_(p)
 
-    return Transformer
+    return transformer_instance
 
     

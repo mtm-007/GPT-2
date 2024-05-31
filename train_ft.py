@@ -57,7 +57,7 @@ def get_ds(config):
         src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids 
         trg_ids = tokenizer_src.encode(item['translation'][config['lang_trg']]).ids 
         max_len_src = max(max_len_src, len(src_ids))
-        max_len_trg = max(max(max_len_trg, len(trg_ids)))
+        max_len_trg = max(max_len_trg, len(trg_ids))
 
     print(f"Max length of the source sentence {max_len_src}")
     print(f"Max length of the target sentence {max_len_trg}")
@@ -74,17 +74,20 @@ def get_model(config, src_vocab_size, trgt_vocab_size):
 
 def train_model(config):
     #Define the device
-    device= 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
+    #device= 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
     #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     print(f"training with {device}")
 
     Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
     train_dataloader, valid_dataloader, tokenizer_src, tokenizer_trg = get_ds(config)
     model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_trg.get_vocab_size()).to(device)
+    print(model)
+
     #Tensorboard
     writer = SummaryWriter(config['experiment'])
 
-    optimizer = torch.optim.Adam(model.parameter(), lr=config['lr'], eps=1e-9)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
 
     #setting up checkpoints if training crushes
     initial_epoch = 0
