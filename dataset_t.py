@@ -73,11 +73,11 @@ class BilingualDataset(Dataset):
         assert label_output.size(0) == self.seq_len
 
         return {
-            "encoder_input": enc_input_tokens, #(seq_len)
-            "decoder_input": dec_input_tokens, #(seq_len)
-            "encoder_mask": (enc_input_tokens != self.pad_token).unsqueeze(0).unsqueeze(0).int(), # (1,1,seq_len)
+            "encoder_input": encoder_input, #(seq_len)
+            "decoder_input": decoder_input, #(seq_len)
+            "encoder_mask": (encoder_input != self.pad_token).unsqueeze(0).unsqueeze(0).int(), # (1,1,seq_len)
             # the decoder mask takes input as seq_len but since we asserted decoder & encdoer to have upto seq_len size we can use their size instead
-            "decoder_mask": (dec_input_tokens != self.pad_token).unsqueeze(0).unsqueeze(0).int() & casual_mask(decoder_input.size(0)),
+            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).unsqueeze(0).int() & casual_mask(decoder_input.size(0)),
             "label_output": label_output, # (seq_len)
             "src_text": src_text,
             "trg_text": trg_text,
