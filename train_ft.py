@@ -9,9 +9,13 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import WordLevelTrainer
 
 from pathlib import Path
+from torch.utils.tensorboard import SummaryWriter 
+from tqdm import tqdm
+import warnings
 
-from dataset_ft import BilingualDataset, casual_mask
+from dataset_t import BilingualDataset, casual_mask
 from model_2 import build_transformer
+from config_ft import get_config, get_weights_file_path
 
 def get_all_sentence(ds, lang):
     for item in ds:
@@ -74,4 +78,72 @@ def train_model(config):
     print(f"training with {device}")
 
     Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
-    
+    train_dataloader, valid_dataloader, tokenizer_src, tokenizer_trg = get_ds(config)
+    model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_trg.get_vocab_size()).to(device)
+    #Tensorboard
+    writer = SummaryWriter(config['experiment'])
+
+    optimizer = torch.optim.Adam(model.parameter(), lr=config['lr'], eps=1e-9)
+
+    #setting up checkpoints if training crushes
+    initial_epoch = 0
+    global_step = 0
+    if config['preload']:
+        model_filename = get_weights_file_path(config, config['preload'])
+        print(f"Preloading model weights {model_filename}")
+        state = torch.load(model_filename)
+        initial_epoch = state['epoch'] + 1
+        optimizer.load_state_dict(state['optimizer_state_dict'])
+        global_step = state['global_state']
+
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
+
+    for epoch in range(initial_epoch, config['num_epochs']):
+        model.train()
+        batch_iterator = tqdm(train_dataloader, desc=f'Processing epoch {epoch:02d}')
+
+        for batch in batch_iterator:
+            encoder_input = batch['encoder_input'].to(device) # Batch, seq_len
+            decoder_input = batch['decoder_input'].to(device) # Batch, seq_len
+            encoder_mask = batch['encoder_mask'].to(device) # (Batch, 1, 1, seq_len)
+            decoder_mask = batch['decoder_mask'].to(device) # (Batch, 1, seq_len, seq_len)
+        
+        #Run the tensors through the Transformer 
+        encoder_output = model.encode(encoder_input, encoder_mask)#(batch, seq_len, d_model)
+        decoder_output = model.encode(encoder_output, encoder_mask, decoder_input, decoder_mask) # (batch, seq_len, d_model)
+        proj_out = model.projection(decoder_output) #(batch, seq_len, trg_vocab_size)
+
+        label = batch['label_output'].to(device) #(batch, seq_len)
+
+        #(batch, seq_len, trg_vocab_size) ->(batch * seq_len, trg_vocab_size)
+        loss = loss_fn(proj_out.view(-1, tokenizer_trg.get_vocab_size()), label.view(-1))
+        batch_iterator.set_postfix({f"loss": f"{loss.item(): 6.3f}"})
+
+        #log the loss to the Tensorboard
+        writer.add_scalar('train_loss', loss.item(), global_step)
+        writer.flush()
+
+        #backdropagate the loss
+        loss.backward()
+
+        #update the loss or weights
+        optimizer.step()
+        optimizer.zero_grad()
+
+        global_step += 1
+
+    #save the model at the end of every epoch
+    model_filename = get_weights_file_path(config, f'{epoch:02d}')
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'opitimizer_state_dict': optimizer.state_dict(),
+        'global_step': global_step,
+    }, model_filename)
+
+if __name__ =='__manin__':
+    #warnings.fiterwarnings('ignore')
+    config = get_config()
+    train_model(config)
+
+
