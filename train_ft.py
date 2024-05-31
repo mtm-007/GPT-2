@@ -24,7 +24,7 @@ def get_all_sentence(ds, lang):
 def get_build_tokenizer(config, ds, lang):
     tokenizer_path = Path(config['tokenizer_file'].format(lang))
     if not Path.exists(tokenizer_path):
-        tokenizer = Tokenizer(WordLevel(unk_token='[UNk]'))
+        tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
         tokenizer.pre_tokenizer = Whitespace()
         #the speacial tokens are unknown, paddding, start of seq, end of seq
         trainer = WordLevelTrainer(special_tokens = ["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequency = 2)
@@ -43,7 +43,7 @@ def get_ds(config):
     tokenizer_trg = get_build_tokenizer(config, ds_raw, config["lang_trg"])
 
     #split for train to 90% and 10% for validation
-    train_ds_size = len(0.9 * len(ds_raw))
+    train_ds_size = int(0.9 * len(ds_raw))
     val_ds_size = len(ds_raw) - train_ds_size
     train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size]) 
 
@@ -132,6 +132,7 @@ def train_model(config):
         optimizer.zero_grad()
 
         global_step += 1
+        
 
     #save the model at the end of every epoch
     model_filename = get_weights_file_path(config, f'{epoch:02d}')
@@ -142,7 +143,7 @@ def train_model(config):
         'global_step': global_step,
     }, model_filename)
 
-if __name__ =='__manin__':
+if __name__ == '__main__':
     #warnings.fiterwarnings('ignore')
     config = get_config()
     train_model(config)
