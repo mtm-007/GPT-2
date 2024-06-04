@@ -82,7 +82,7 @@ def train_model(config):
     Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
     train_dataloader, valid_dataloader, tokenizer_src, tokenizer_trg = get_ds(config)
     model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_trg.get_vocab_size()).to(device)
-    print(model)
+    
 
     #Tensorboard
     writer = SummaryWriter(config['experiment'])

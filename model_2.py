@@ -35,8 +35,8 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(seq_len, d_model)
 
         #create a tensor of shape (seq_len,1)....unsqueeze(1) is used to add a dimension at the end
-        position = torch.arange(0, seq_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
+        position = torch.arange(0, seq_len).unsqueeze(1) #(seq_len, 1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)) # (d_model/2)
         #apply the sin to even indexed dimensions and cos to odd indexed dimensions
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -47,8 +47,18 @@ class PositionalEncoding(nn.Module):
         # the buffer is something we add with the file or state of the model but not as a learned parameter
         self.register_buffer('pe', pe)
         
+    
     def forward(self, x):
-        x = x + (self.pe[:, :x.shape[1], :]).requires_grad(False)
+        #self.pe.requires_grad =False, this line is not necessary since pe initialized with register_buffer
+
+        # Check dimensions
+        print("x dimensions:", x.shape)
+        print("self.pe dimensions:", self.pe.shape)
+        if x.size(2) != self.d_model:
+            raise ValueError(f"Input tensor has incorrect dimension {x.size(2)}, expected {self.d_model}")
+        
+        #x = x + self.pe[:, :x.size(1), :]
+        x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
     
 
@@ -240,6 +250,7 @@ class Transformer(nn.Module):
 
     def encode(self, src, enc_mask):
         #src is the source data or file
+        print(f"Shape of src before embedding: {src.shape}")
         src = self.enc_embed(src) # apply the encoder embedding on the source data
         src = self.enc_pos(src) # add the positional encoding
         return self.encoder(src, enc_mask)
@@ -260,8 +271,8 @@ def build_transformer(src_vocab_size: int, trgt_vocab_size: int, enc_seq_len: in
     dec_embed = InputEmbeddings(d_model, trgt_vocab_size)
 
     #create the positional embedding
-    enc_pos = PositionalEncoding(d_model, src_vocab_size, dropout)
-    dec_pos = PositionalEncoding(d_model, trgt_vocab_size, dropout)
+    enc_pos = PositionalEncoding(d_model, enc_seq_len, dropout)
+    dec_pos = PositionalEncoding(d_model, dec_seq_len, dropout)
 
     #create the encoder blocks
     encoder_blocks = []
