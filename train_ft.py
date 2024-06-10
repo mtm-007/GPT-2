@@ -32,7 +32,7 @@ def greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_t
         if decoder_input.size(1) == max_len:
             break
         #build mask for the target (decoder input)
-        decoder_mask = casual_mask(decoder_input.size(1).type_as(encoder_input)).to(device)
+        decoder_mask = casual_mask(decoder_input.size(1)).type_as(encoder_input).to(device)
 
         #calculate the output of the decoder
         out = model.decode(encoder_output, encoder_mask, decoder_input, decoder_mask)
@@ -72,7 +72,7 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_trg, max_len, 
 
             source_txt = batch['src_text'][0]
             target_text = batch['trg_text'][0]
-            model_out_text = tokenizer_trg.decode(model_out.detach.cpu().numpy())#convert the id to tokens to get the model_out text 
+            model_out_text = tokenizer_trg.decode(model_out.detach().cpu().numpy())#convert the id to tokens to get the model_out text 
 
             source_txts.append(source_txt)
             expected.append(target_text)

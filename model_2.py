@@ -273,7 +273,7 @@ class Transformer(nn.Module):
     
 # the enc_seq_len represents the source Language and the dec_seq_len represents the target language, they can be the same or different (i.e for different language translation)
 # d_model size is 512 here according with the paper but can changed easily,
-def build_transformer(src_vocab_size: int, trgt_vocab_size: int, enc_seq_len: int, dec_seq_len: int, d_model: int = 512, N: int = 6, n_head: int= 8, dropout: float= 0.01, d_ff: int = 2048) -> Transformer:
+def build_transformer(src_vocab_size: int, trgt_vocab_size: int, enc_seq_len: int, dec_seq_len: int, d_model: int = 512, N: int = 4, n_head: int= 4, dropout: float= 0.01, d_ff: int = 2048) -> Transformer:
     #create the embedding layers
     enc_embed = InputEmbeddings(d_model, src_vocab_size)
     dec_embed = InputEmbeddings(d_model, trgt_vocab_size)
