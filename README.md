@@ -1,5 +1,5 @@
-# GPT-2 Transformers
-- `GPT-2`
+# Transformers
+## GPT- 2 (124M parameter) 
 
 # Full Transformers Architecture 
 ## This repo 
@@ -15,5 +15,3 @@
 # Experiment Tracking
 - for experment tracking the repo uses `Wandb` on the alternative  `mlflow` can be used to its fully opensource and open governance   
 
-# torch.compile as pytorch > 2.0
-- in the latest commits torch.compile() is used to give some faster training kick back, will track how much performance boost this resoult 
