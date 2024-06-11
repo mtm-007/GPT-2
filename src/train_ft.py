@@ -13,9 +13,9 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import warnings
 
-from dataset_t import BilingualDataset, casual_mask
-from model_2 import build_transformer
-from config_ft import get_config, get_weights_file_path
+from src.dataset_t import BilingualDataset, casual_mask
+from src.model_2 import build_transformer
+from src.config_ft import get_config, get_weights_file_path
 
 
 #this will compute the encoder output only once then use it for any inference we use for decoder
