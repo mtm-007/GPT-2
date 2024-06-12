@@ -1,2 +1,6 @@
 python
 torch
+wandb
+matplotlib
+datasets
+tqdm
