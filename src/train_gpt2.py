@@ -96,6 +96,26 @@ class GPT(nn.Module):
         #GPT2 paper no bias
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
+    def forward(self, idx):
+        #idx is in a shape of (B,T), T is upto the block size( max sequence length)
+        B, T = idx.size() # (B by T) is 2 dim tensor of T token rows then staked as B batchs 
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        #this is going to define the elements one by one following the GPT __init__(initialization) in the self.transformer -> (wte,wpe,h,ln_f, then lm_head)
+        #forward the token and positional embeddings
+        pos = torch.arange(0 , T, dtype= torch.long, device = idx.device) #shape(T)
+        pos_emb = self.transformer.wpe(pos) #positional embedding of shape (T, n_embd)
+        tok_emb = self.transformer.wte(idx) #token embedding of shape (B, T, n_embd)
+        x = tok_emb + pos_emb
+        #forward block of the transformer
+        for block in self.transformer.h:
+            x = block(x)
+        #forwars the final layer norm in the tranformer
+        x = self.transformer.ln_f(x)
+        #every (B,T) 2 dim tensors calculates logits what comes next
+        logits = self.lm_head(x) #(B, T, vocab_size), vocab size is the number of possible tokens, looking for (B, T+1 token)
+        return logits
+
+
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model weights from huggingface"""
@@ -114,8 +134,10 @@ class GPT(nn.Module):
         #create a from scratch 
         config = GPTConfig(**config_args)
         model = GPT(config)
+        #creating stat_dict for both our model and for weight from huggingface
         sd = model.state_dict()
         sd_keys = sd.keys()
+        # ignoring the buffer(they are not parameters) biases that come with the autoregressive mask
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
         
 
@@ -144,6 +166,59 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
-# -------
+    
+# ------------------------------------------------------------------------------------
+
+device= "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device= "mps"
+print(f"the available device is: {device}")
+
+num_returned_seq = 5
+max_length =30
+
 model = GPT.from_pretrained('gpt2')
+#model = GPT(GPTConfig())
+model.eval()
+model.to(device)
+
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hey, I am a Math genius,")
+tokens = torch.tensor(tokens, dtype= torch.long)#(8,) , 8 tokens counted
+tokens = tokens.unsqueeze(0).repeat(num_returned_seq, 1) #(5,8) replicating it to 5 rows
+x = tokens.to('device') # x is our idx, to get the 9th token
+
 print("it works not crushed yet yyy")
+
+#!Generate
+#set seed to 42
+torch.manual_seed(42)
+#torch.cuda.manual_seed(42)
+while x.size(1) < max_length: # T is less than max length
+    #forwars the model to get logits
+    with torch.no_grad():
+        logits = model(x) #(B,T,vocab size)
+        #take logits at the last position
+        logits = logits[:,-1,:] #(B, vocab size)....correct but inefficient sampling
+        #get the probabilities
+        probs = F.softmax(logits, dim=-1)
+        #do top-k sampling of (50 huggingface pipeline default)
+        #topk_probs here becomes(5, 50) topk_indices is (5, 50)
+        topk_probs, topk_indices = torch.topk(probs, 50, dim= -1)
+        ix = torch.multinomial(topk_probs, 1)#(B, 1)
+        #gather corrersponding indices
+        xcol = torch.gather(topk_indices, -1, ix) #(B, 1)
+        #append to the seq
+        x= torch.cat((x, xcol), dim=1)
+
+#print the generated text
+for i in range(num_returned_seq):
+    tokens = x[i,:max_length].tolist()
+    decoded = enc.decode(tokens)
+    print('>',decoded)
+
+
+
