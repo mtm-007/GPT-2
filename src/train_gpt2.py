@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F 
 
+from src.utils import DataLoaderLite
+
 #---------
 
 
@@ -179,7 +181,7 @@ if torch.cuda.is_available():
     device = "cuda"
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device= "mps"
-device = "cpu" #overide
+#device = "cpu" #overide
 print(f"the available device is: {device}")
 
 
@@ -201,15 +203,25 @@ text = text[:1000]
 tokens = enc.encode(text)
 B, T = 4, 32
 buff = torch.tensor(tokens[:B*T + 1])
+buff = buff.to(device) #its not stateful it would create a new pointer on the device if not assigned to a variable
 x = buff[:-1].view(B, T)
 y  = buff[1:].view(B, T)
 
 
 model = GPT(GPTConfig())
 model = model.to(device)
-logits, loss = model(x, y)
 
-print(loss)
+#AdamW improves upon Adam optimizer by decoupling the weight decay from the gradient update rule, by directly applying weight decay to the weights before gradient update step
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+#logits, loss = model(x, y)
+#at initiazation we expect uniform probability over token(no favaourism) so {-ln(1/50157) = 10.82} close enough
+for i in range(50):
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}, loss: {loss.item()}") # .item converts the 1 element tensor to a float and is moved to cpu
+
 
 import sys; sys.exit(0)
 model.eval()
