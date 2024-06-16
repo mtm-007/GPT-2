@@ -6,6 +6,7 @@ from torch.nn import functional as F
 
 #---------
 
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -96,9 +97,9 @@ class GPT(nn.Module):
         #GPT2 paper no bias
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
-    def forward(self, idx):
+    def forward(self, idx, targets = None):
         #idx is in a shape of (B,T), T is upto the block size( max sequence length)
-        B, T = idx.size() # (B by T) is 2 dim tensor of T token rows then staked as B batchs 
+        B, T = idx.size() # (B by T) is 2 dim tensor of T token rows then staked rows as B batchs 
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         #this is going to define the elements one by one following the GPT __init__(initialization) in the self.transformer -> (wte,wpe,h,ln_f, then lm_head)
         #forward the token and positional embeddings
@@ -113,7 +114,11 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         #every (B,T) 2 dim tensors calculates logits what comes next
         logits = self.lm_head(x) #(B, T, vocab_size), vocab size is the number of possible tokens, looking for (B, T+1 token)
-        return logits
+        loss = None
+        if targets is not None:
+            #cross entropy does not like multidim inputs so we flatten them from 3 dim to 2 dim 
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
 
     @classmethod
@@ -174,22 +179,46 @@ if torch.cuda.is_available():
     device = "cuda"
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device= "mps"
+device = "cpu" #overide
 print(f"the available device is: {device}")
 
-num_returned_seq = 5
-max_length =30
 
-model = GPT.from_pretrained('gpt2')
-#model = GPT(GPTConfig())
-model.eval()
-model.to(device)
+# Print device and device type
+#device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 
-import tiktoken
+#----------
+# num_returned_seq = 5
+# max_length =30
+#model = GPT.from_pretrained('gpt2')
+#model.eval() 
+#model.to(device)
+
+import tiktoken 
 enc = tiktoken.get_encoding('gpt2')
-tokens = enc.encode("Hey, I am a Math genius,")
+with open('../data/input.txt', 'r') as f:
+    text = f.read()
+text = text[:1000]
+tokens = enc.encode(text)
+B, T = 4, 32
+buff = torch.tensor(tokens[:B*T + 1])
+x = buff[:-1].view(B, T)
+y  = buff[1:].view(B, T)
+
+
+model = GPT(GPTConfig())
+model = model.to(device)
+logits, loss = model(x, y)
+
+print(loss)
+
+import sys; sys.exit(0)
+model.eval()
+num_return_sequences = 5
+max_length = 30
+tokens = enc.encode("Hello, I'm a language model,")
 tokens = torch.tensor(tokens, dtype= torch.long)#(8,) , 8 tokens counted
 tokens = tokens.unsqueeze(0).repeat(num_returned_seq, 1) #(5,8) replicating it to 5 rows
-x = tokens.to('device') # x is our idx, to get the 9th token
+x = tokens.to(device) # x is our idx, to get the 9th token
 
 print("it works not crushed yet yyy")
 
@@ -200,6 +229,7 @@ torch.manual_seed(42)
 while x.size(1) < max_length: # T is less than max length
     #forwars the model to get logits
     with torch.no_grad():
+        #since we specify the device type in idx while GPT forward initialization, the  tensor location wont miss match as on CPU or GPU
         logits = model(x) #(B,T,vocab size)
         #take logits at the last position
         logits = logits[:,-1,:] #(B, vocab size)....correct but inefficient sampling
