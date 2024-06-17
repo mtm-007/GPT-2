@@ -6,12 +6,12 @@ class DataLoaderLite():
         self.B = B
         self.T = T
 
-        with open('..data/input.txt', 'r') as f:
+        with open('../data/input.txt', 'r') as f:
             text = f.read()
         
         enc = tiktoken.get_encoding("gpt2")
         tokens = enc.encode(text)
-        self.token = torch.tensor(tokens)
+        self.tokens = torch.tensor(tokens)
         print(f' loaded {len(tokens)} tokens')
         print(f"1 epoch = {len(tokens) // (B * T)} batches")
 

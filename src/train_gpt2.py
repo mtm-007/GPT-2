@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 import math
+import tiktoken
 import torch
 import torch.nn as nn
 from torch.nn import functional as F 
 
-from src.utils import DataLoaderLite
+from utils import DataLoaderLite
 
 #---------
 
@@ -18,6 +19,8 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3* config.n_embd)
         #output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        #andrej Karpathy_special_edition scaling residual
+        self.c_proj.NANOGPT_SCALE_INIT=1
         # regulirazation
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -54,6 +57,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4* config.n_embd)
         self.gelu = nn.GELU(approximate='tanh') # this was first historically used (in GPT2 as well), but now the exact gelu can be used
         self.c_proj = nn.Linear(4* config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT=1
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -98,6 +102,23 @@ class GPT(nn.Module):
         ))
         #GPT2 paper no bias
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        #weight sharing/tying scheme, this alone saves 1/3 of the parameters size in GPT2(124) as (768*50257~38.5 million Para),also improves perf
+        self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std=0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)#this GPT2 initialization is roughly equivalent to the xavier initialazation too
+            if module.bias is not None:
+                #by default in pytorch bias is initialized with a uniform
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
     def forward(self, idx, targets = None):
         #idx is in a shape of (B,T), T is upto the block size( max sequence length)
@@ -184,29 +205,16 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
 #device = "cpu" #overide
 print(f"the available device is: {device}")
 
-
 # Print device and device type
 #device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 
 #----------
-# num_returned_seq = 5
-# max_length =30
-#model = GPT.from_pretrained('gpt2')
-#model.eval() 
-#model.to(device)
 
-import tiktoken 
-enc = tiktoken.get_encoding('gpt2')
-with open('../data/input.txt', 'r') as f:
-    text = f.read()
-text = text[:1000]
-tokens = enc.encode(text)
-B, T = 4, 32
-buff = torch.tensor(tokens[:B*T + 1])
-buff = buff.to(device) #its not stateful it would create a new pointer on the device if not assigned to a variable
-x = buff[:-1].view(B, T)
-y  = buff[1:].view(B, T)
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
 
+train_loader = DataLoaderLite(B=4, T=32)
 
 model = GPT(GPTConfig())
 model = model.to(device)
@@ -216,8 +224,12 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 #logits, loss = model(x, y)
 #at initiazation we expect uniform probability over token(no favaourism) so {-ln(1/50157) = 10.82} close enough
 for i in range(50):
+    x, y = train_loader.next_batch()
+    #move our tensors from cpu to device
+    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
+    import code; code.interact(local=locals())
     loss.backward()
     optimizer.step()
     print(f"step {i}, loss: {loss.item()}") # .item converts the 1 element tensor to a float and is moved to cpu
