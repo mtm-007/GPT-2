@@ -228,6 +228,7 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
 print(f"the available device is: {device}")
 wandb.log({"the available device is": str(device)})
 
+
 def device_synchronise():
     '''autoselect torch synchronization based on device available'''
     if torch.cuda.is_available():
