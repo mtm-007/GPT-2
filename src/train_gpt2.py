@@ -5,6 +5,9 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F 
 
+import wandb
+wandb.login()
+
 from utils import DataLoaderLite
 
 #---------
@@ -196,6 +199,7 @@ class GPT(nn.Module):
         return model
     
 # ------------------------------------------------------------------------------------
+import time
 
 device= "cpu"
 if torch.cuda.is_available():
@@ -204,35 +208,64 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device= "mps"
 #device = "cpu" #overide
 print(f"the available device is: {device}")
+wandb.log({"the available device is: str(device)"})
 
+def device_synchronise():
+    '''autoselect torch synchronization based on device available'''
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        torch.mps.synchronize()
 # Print device and device type
 #device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 
 #----------
+# wandb tracking initialization
+wandb.init(project = 'nano-gpt-tracking-test',
+      config={
+            "B" :8,
+            "T" : 1024,
+            "lr" : 3e-4,
+            "iterations" :50,
+
+      })
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader = DataLoaderLite(B=4, T=32)
+train_loader = DataLoaderLite(B=4, T=1024)
+torch.set_float32_matmul_precision('high')
 
 model = GPT(GPTConfig())
 model = model.to(device)
 
+#wandb tracking model
+wandb.watch(model)
 #AdamW improves upon Adam optimizer by decoupling the weight decay from the gradient update rule, by directly applying weight decay to the weights before gradient update step
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 #logits, loss = model(x, y)
 #at initiazation we expect uniform probability over token(no favaourism) so {-ln(1/50157) = 10.82} close enough
 for i in range(50):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     #move our tensors from cpu to device
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
-    import code; code.interact(local=locals())
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
+        import code; code.interact(local=locals())
     loss.backward()
     optimizer.step()
-    print(f"step {i}, loss: {loss.item()}") # .item converts the 1 element tensor to a float and is moved to cpu
+    #torch.mps.synchronize()#torch.cuda.synchronize()
+    device_synchronise()
+    t01 = time.time()
+    dt = (t01-t0)*1000#for time diff in millisecond
+    dts = (t01-t0)#for time diff seconds
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t01-t0)
+    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, {dts:.2f}sec, tec/sec: {tokens_per_sec:.2f}") # .item converts the 1 element tensor to a float and is moved to cpu
+    wandb.log({"step": i, "loss": loss.item(), "dt": f"{dt:.2f}ms", "dts": f"{dts:.2f}s", "tokens_per_sec": f"{tokens_per_sec:.2f}"})
+
 
 
 import sys; sys.exit(0)
