@@ -42,10 +42,15 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         #attention (materilizes the large(T,T)matrix for all queries and key)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) 
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        y = att @ v #(B, nh, T, T) x (B,nh, T, hs) => (B, nh, T, hs)
+
+        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) 
+        # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        # att = F.softmax(att, dim=-1)
+        # y = att @ v #(B, nh, T, T) x (B,nh, T, hs) => (B, nh, T, hs)
+
+        #flash attention implemented in pytorch
+        y = F.scaled_dot_product_attention(q,k,v, is_causal=True)
+
         y = y.transpose(1, 2).contiguous().view(B, T, C)# re-assemble all head outputs side by side, this also computes the concatation
         #output projection
         y = self.c_proj(y)
@@ -199,6 +204,19 @@ class GPT(nn.Module):
         return model
     
 # ------------------------------------------------------------------------------------
+# wandb tracking initialization
+wandb.init(project = 'nano-gpt-tracking-test',
+      config={
+            "B" :16,
+            "T" : 1024,
+            "lr" : 3e-4,
+            "iterations" :50*20,
+            "torch compile": "True",
+            "flash_attention": "True",
+            "vocab_size_padded_to_even_num": "True", 
+
+      })
+
 import time
 
 device= "cpu"
@@ -208,7 +226,7 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device= "mps"
 #device = "cpu" #overide
 print(f"the available device is: {device}")
-wandb.log({"the available device is: str(device)"})
+wandb.log({"the available device is": str(device)})
 
 def device_synchronise():
     '''autoselect torch synchronization based on device available'''
@@ -220,25 +238,19 @@ def device_synchronise():
 #device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 
 #----------
-# wandb tracking initialization
-wandb.init(project = 'nano-gpt-tracking-test',
-      config={
-            "B" :8,
-            "T" : 1024,
-            "lr" : 3e-4,
-            "iterations" :50,
 
-      })
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader = DataLoaderLite(B=4, T=1024)
+train_loader = DataLoaderLite(B=16, T=1024)
 torch.set_float32_matmul_precision('high')
 
-model = GPT(GPTConfig())
+#overiding vocab size with padded tokens to make it more even factor of 2 number
 model = model.to(device)
+model = GPT(GPTConfig(vocab_size=50304)) 
+model = torch.compile(model)
 
 #wandb tracking model
 wandb.watch(model)
@@ -246,7 +258,7 @@ wandb.watch(model)
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 #logits, loss = model(x, y)
 #at initiazation we expect uniform probability over token(no favaourism) so {-ln(1/50157) = 10.82} close enough
-for i in range(50):
+for i in range(50*20):
     t0 = time.time()
     x, y = train_loader.next_batch()
     #move our tensors from cpu to device
@@ -254,7 +266,7 @@ for i in range(50):
     optimizer.zero_grad()
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits, loss = model(x, y)
-        import code; code.interact(local=locals())
+        #import code; code.interact(local=locals())
     loss.backward()
     optimizer.step()
     #torch.mps.synchronize()#torch.cuda.synchronize()
