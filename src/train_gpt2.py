@@ -17,7 +17,7 @@ wandb.init(project = 'nano-gpt-tracking-test',
             "B" :16,
             "T" : 1024,
             "lr" : 3e-4,
-            "iterations" :50,
+            "iterations" :50*2,
             "torch compile": "True",
             "flash_attention": "True",
             "vocab_size_padded_to_even_num": "True", 
@@ -298,7 +298,7 @@ wandb.watch(model)
 
 max_lr = 6e-4
 min_lr = max_lr *10 
-max_steps = 50
+max_steps = 50 *2
 warm_up_steps = max_steps * 0.2
 
 def get_lr(iter):
@@ -346,7 +346,7 @@ for step in range(max_steps):
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
     tokens_per_sec = tokens_processed / dt
     print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr : {lr:.4e} | norm : {norm:.4f} | dt: {dt:.2f}ms | {dts:.2f}sec | tec/sec: {tokens_per_sec:.2f}") # .item converts the 1 element tensor to a float and is moved to cpu
-    wandb.log({"step": f"{step:4d}", "loss": loss.item(), "lr" : f"{lr:.4e}", "norm" : f"{norm:.4f}", "dt": f"{dt:.2f}ms", "dts": f"{dts:.2f}s", "tokens_per_sec": f"{tokens_per_sec:.2f}"})
+    wandb.log({"step": f"{step:4d}", "loss": loss_accum.item(), "lr" : f"{lr:.4e}", "norm" : f"{norm:.4f}", "dt": f"{dt:.2f}ms", "dts": f"{dts:.2f}s", "tokens_per_sec": f"{tokens_per_sec:.2f}"})
 
 
 
