@@ -5,14 +5,27 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F 
 
-import wandb
-wandb.login()
-
+import inspect
 from utils import DataLoaderLite
 
 #---------
+import wandb
+wandb.login()
 
+wandb.init(project = 'nano-gpt-tracking-test',
+      config={
+            "B" :16,
+            "T" : 1024,
+            "lr" : 3e-4,
+            "iterations" :50,
+            "torch compile": "True",
+            "flash_attention": "True",
+            "vocab_size_padded_to_even_num": "True", 
+            "gradient_accumulation": "True",
 
+      })
+
+#-------------------
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -203,19 +216,36 @@ class GPT(nn.Module):
 
         return model
     
+    def configure_optimizer(self, weight_decay, learning_rate, device):
+        #start with all the candidate parameters (that require grad)
+        param_dict = {pn: p for pn,p in self.named_parameters()}
+        param_dict = {pn: p  for pn,p in param_dict.items() if p.requires_grad}
+        #create the optim groups. Any parameter that is 2dim will be weigth decayed, others no
+        #i.e. all weight tensors in mat_mal + embedding decay, all biases and layernorm dont
+        decay_params = [p for pn, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for pn, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params' : decay_params, "weight_decay" : weight_decay},
+            {"params" : nodecay_params, "weight_decay" : 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num of decayed parameter tensors: {len(decay_params)}, with {num_decay_params: }, parameters")
+        print(f"num of not decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params: }, parameters")
+        wandb.log({ "num of decayed parameter tensors": len(decay_params), "sum of decay_params": num_decay_params})
+        wandb.log({ "num of not decayed parameter tensors": len(nodecay_params), "sum of nodecay_params": num_nodecay_params})
+
+        #create AdamW optimizer and use fused if available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        print(f"using fused AdamW: {use_fused}")
+        wandb.log({"using fused Adamw": str(use_fused)})
+        optimizer = torch.optim.AdamW(optim_groups, lr= learning_rate, betas=(0.9, 0.95), eps=1e-8, fused = use_fused)
+        return optimizer
+
 # ------------------------------------------------------------------------------------
 # wandb tracking initialization
-wandb.init(project = 'nano-gpt-tracking-test',
-      config={
-            "B" :16,
-            "T" : 1024,
-            "lr" : 3e-4,
-            "iterations" :50*20,
-            "torch compile": "True",
-            "flash_attention": "True",
-            "vocab_size_padded_to_even_num": "True", 
 
-      })
 
 import time
 
@@ -245,39 +275,78 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader = DataLoaderLite(B=16, T=1024)
+total_batch_size = 524288 #2**19 ~= 0.5M tokens
+B= 16 #micro batch
+T= 1024 # max seq len
+assert total_batch_size % (B*T)==0, "make sure total batch size is divisible by (B*T)"
+grad_accum_steps = total_batch_size // (B * T)
+print(f"total desired batch size (aka offcial GPT2 size): {total_batch_size}")
+wandb.log({"total desired batch size (aka offcial GPT2 size)": total_batch_size})
+print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+wandb.log({"=> calculated gradient accumulation steps ": grad_accum_steps})
+
+train_loader = DataLoaderLite(B=B, T=T)
 torch.set_float32_matmul_precision('high')
 
 #overiding vocab size with padded tokens to make it more even factor of 2 number
-model = model.to(device)
 model = GPT(GPTConfig(vocab_size=50304)) 
+model = model.to(device)
 model = torch.compile(model)
 
 #wandb tracking model
 wandb.watch(model)
+
+max_lr = 6e-4
+min_lr = max_lr *10 
+max_steps = 50
+warm_up_steps = max_steps * 0.2
+
+def get_lr(iter):
+    #linear warm up for warm up steps
+    if iter < warm_up_steps:
+        return max_lr * (iter+1) / warm_up_steps
+    #if iter > lr_decay_iters, return min learning rate
+    if iter > max_steps:
+        return min_lr
+    #in between ,use cosine decay down to min learning rate
+    decay_ratio = (iter - warm_up_steps) / (max_steps - warm_up_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) #coffe starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
+    
 #AdamW improves upon Adam optimizer by decoupling the weight decay from the gradient update rule, by directly applying weight decay to the weights before gradient update step
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+#optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=6e-4, device=device)
 #logits, loss = model(x, y)
 #at initiazation we expect uniform probability over token(no favaourism) so {-ln(1/50157) = 10.82} close enough
-for i in range(50*20):
+for step in range(max_steps):
     t0 = time.time()
-    x, y = train_loader.next_batch()
-    #move our tensors from cpu to device
-    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
-        #import code; code.interact(local=locals())
-    loss.backward()
+    loss_accum = 0.0
+    for micro_step_grad in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        #move our tensors from cpu to device
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+            #import code; code.interact(local=locals())
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     #torch.mps.synchronize()#torch.cuda.synchronize()
     device_synchronise()
     t01 = time.time()
     dt = (t01-t0)*1000#for time diff in millisecond
     dts = (t01-t0)#for time diff seconds
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t01-t0)
-    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, {dts:.2f}sec, tec/sec: {tokens_per_sec:.2f}") # .item converts the 1 element tensor to a float and is moved to cpu
-    wandb.log({"step": i, "loss": loss.item(), "dt": f"{dt:.2f}ms", "dts": f"{dts:.2f}s", "tokens_per_sec": f"{tokens_per_sec:.2f}"})
+    tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
+    tokens_per_sec = tokens_processed / dt
+    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr : {lr:.4e} | norm : {norm:.4f} | dt: {dt:.2f}ms | {dts:.2f}sec | tec/sec: {tokens_per_sec:.2f}") # .item converts the 1 element tensor to a float and is moved to cpu
+    wandb.log({"step": f"{step:4d}", "loss": loss.item(), "lr" : f"{lr:.4e}", "norm" : f"{norm:.4f}", "dt": f"{dt:.2f}ms", "dts": f"{dts:.2f}s", "tokens_per_sec": f"{tokens_per_sec:.2f}"})
 
 
 
