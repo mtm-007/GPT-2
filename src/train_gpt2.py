@@ -291,6 +291,7 @@ torch.set_float32_matmul_precision('high')
 #overiding vocab size with padded tokens to make it more even factor of 2 number
 model = GPT(GPTConfig(vocab_size=50304)) 
 model = model.to(device)
+model = model.to(device)
 model = torch.compile(model)
 
 #wandb tracking model
