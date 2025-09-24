@@ -1,6 +1,9 @@
-python
-torch
-wandb
 matplotlib
 datasets
-tqdm
+tqdm 
+numpy
+pylzma
+ipykernel
+torch
+wandb
+
