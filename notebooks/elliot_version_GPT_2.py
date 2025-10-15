@@ -5,6 +5,9 @@ import sys
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import mmap
+import random
+
 from pathlib import Path
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -20,12 +23,12 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 torch.manual_seed(1337)
 
-block_size = 1024
-batch_size = 128
-max_iters = 201
+block_size = 512
+batch_size = 32
+max_iters = 3001
 learning_rate = 3e-4
-eval_iters = 100
-eval_interval = 100
+eval_iters = 200
+eval_interval = 200
 n_embed = 384
 n_layer = 4
 n_head = 4
@@ -35,12 +38,12 @@ dropout = 0.2
 
 wandb.init(project = 'nano-gpt-tracking-test',
       config={
-            "block_size" : 1024,
-            "batch_size" :128,
-            "max_iters" :201,
-            "eval_iterval" : 100,
+            "block_size" : 512,
+            "batch_size" :32,
+            "max_iters" :3001,
+            "eval_iterval" : 200,
             "lr" : 3e-4,
-            "eval_iters" : 100,
+            "eval_iters" : 200,
             "n_emb" : 384,
             "n_layer" : 4,
             "n_head" :4,
@@ -51,7 +54,7 @@ wandb.init(project = 'nano-gpt-tracking-test',
 
 
 chars = ""
-data_used = '../data/input.txt'
+data_used = '../data/vocab.txt'
 with open(data_used, 'r', encoding='utf-8')as f:
     text = f.read()
     chars = sorted(set(text))
@@ -69,34 +72,87 @@ decode = lambda l: ''.join([int_to_strng[i] for i in l])
 
 # encoded_hello = torch.tensor(encode('hello'),dtype=torch.long)
 # decoded_hello = decode(encoded_hello.tolist())
+#data = torch.tensor(encode(text), dtype=torch.long)
 
-data = torch.tensor(encode(text), dtype=torch.long)
+# Define file paths
+original_training_file = "../data/train_split.txt"
+original_validation_file = "../data/val_split.txt"
+
+# Create 1GB sample files for trial
+sample_training_file = "../data/train_sample_1Gb.txt"
+sample_validation_file = "../data/val_sample_100MB.txt"
+
+# Create 1GB sample from training file
+print("Creating 1GB training sample...")
+with open(original_training_file, "rb") as f:
+    chunk = f.read(1 * 1024**3)  # Read first 1GB
+
+with open(sample_training_file, "wb") as f:
+    f.write(chunk)
+print(f"✓ Created {sample_training_file}")
+
+# Create 1GB sample from validation file (optional, or make it smaller)
+print("Creating validation sample...")
+with open(original_validation_file, "rb") as f:
+    chunk = f.read(100 * 1024**2)  # Read 100MB for validation
+
+with open(sample_validation_file, "wb") as f:
+    f.write(chunk)
+print(f"✓ Created {sample_validation_file}")
 
 
-n = int(0.9*len(data))
+def get_random_chunk(split):
+    filename = sample_training_file if split == "train" else sample_validation_file
+    with open(filename, "rb") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            #file size and a random position to start reading
+            file_size = len(mm)
+            start_pos = random.randint(0, (file_size) - block_size*batch_size)
 
-train_data = data[:n]
-val_data = data[n:]
+            #seek to the random position and read the block of text
+            mm.seek(start_pos)
+            block = mm.read(block_size*batch_size-1)
 
-train_data = train_data.to(device, non_blocking=True)
-val_data = val_data.to(device, non_blocking=True)
+            #dcode the block to string, ignoring any invalid byte sequences
+            decoded_block = block.decode("utf-8", errors="ignore").replace('\r', '')
+
+            #Train and test splits
+            data = torch.tensor(encode(decoded_block), dtype=torch.long)
+    return data
 
 
 def get_batch(split):
-    """
-    Efficient GPU-native batch sampling for sequence data.
-    Returns x, y already on the GPU, contiguous.
-    """
-    data = train_data if split == 'train' else val_data
-    # Sample batch indices directly on GPU
-    ix = torch.randint(len(data) - block_size, (batch_size,), device=device)
+    data = get_random_chunk(split)
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([data[i:i+block_size]for i in ix])
+    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x, y = x.to(device), y.to(device)
+    return x,y
 
-    # Create a 2D tensor of shape (batch_size, block_size) for x
-    x = data[ix[:, None] + torch.arange(block_size, device=device)]
-    y = data[ix[:, None] + torch.arange(1, block_size + 1, device=device)]
+# n = int(0.9*len(data))
 
-    # Optional: make contiguous for better memory access in CUDA
-    return x.contiguous(), y.contiguous()
+# train_data = data[:n]
+# val_data = data[n:]
+
+# train_data = train_data.to(device, non_blocking=True)
+# val_data = val_data.to(device, non_blocking=True)
+
+
+# def get_batch(split):
+#     """
+#     Efficient GPU-native batch sampling for sequence data.
+#     Returns x, y already on the GPU, contiguous.
+#     """
+#     data = train_data if split == 'train' else val_data
+#     # Sample batch indices directly on GPU
+#     ix = torch.randint(len(data) - block_size, (batch_size,), device=device)
+
+#     # Create a 2D tensor of shape (batch_size, block_size) for x
+#     x = data[ix[:, None] + torch.arange(block_size, device=device)]
+#     y = data[ix[:, None] + torch.arange(1, block_size + 1, device=device)]
+
+#     # Optional: make contiguous for better memory access in CUDA
+#     return x.contiguous(), y.contiguous()
 
 
 # def get_batch(split):
@@ -291,7 +347,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 #lets try without AMP
 
 # OPTION A: Remove AMP completely (try this first)
-USE_AMP = False
+USE_AMP = True
 
 if USE_AMP:
     scaler = GradScaler()
