@@ -2,8 +2,7 @@ import sys
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import mmap
-import random
+import mmap,threading, queue, random
 
 from pathlib import Path
 from datetime import datetime
@@ -14,8 +13,8 @@ print(device)
 torch.manual_seed(1337)
 
 
-# block_size = 512
-# batch_size = 32
+block_size = 512
+batch_size = 32*2
 
 
 chars = ""
@@ -88,5 +87,32 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i+block_size]for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x,y
+    #x, y = x.to(device), y.to(device)
+    #return x,y
+    return x.pin_memory(), y.pin_memory()
+
+class PrefetchLoader:
+    def __init__(self, split="train", prefetch=8, num_workers=-1):
+        self.split = split
+        self.queue = queue.Queue(maxsize=prefetch)
+        # self.thread = threading.Thread(target=self._worker, daemon=True)
+        # self.thread.start()
+        self.workers = []
+
+        for _ in range(num_workers):
+            t = threading.Thread(target=self._worker, daemon=True)
+            t.start()
+            self.workers.append(t)
+
+    def _worker(self):
+        while True:
+            batch = get_batch(self.split)
+            self.queue.put(batch)
+
+    def next(self):
+        # Wait for the next preloaded batch
+        x, y = self.queue.get()
+        # Move asynchronously to GPU
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        return x, y
