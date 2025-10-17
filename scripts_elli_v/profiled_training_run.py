@@ -2,7 +2,7 @@ import sys
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import mmap, random, time
+import mmap, random, time,pickle
 import statistics
 
 from pathlib import Path
@@ -27,7 +27,7 @@ print(device)
 torch.manual_seed(1337)
 
 block_size = 512
-batch_size = 32*2
+batch_size = 48
 max_iters = 1000
 learning_rate = 3e-4
 eval_iters = 100
@@ -42,7 +42,7 @@ dropout = 0.2
 wandb.init(project = 'nano-gpt-tracking-test',
       config={
             "block_size" : 512,
-            "batch_size" :32*2,
+            "batch_size" :48,
             "max_iters" :1000,
             "eval_iterval" : 100,
             "lr" : 3e-4,
@@ -54,6 +54,27 @@ wandb.init(project = 'nano-gpt-tracking-test',
             #"dtype" : 'bfloat16' didnt work yet need some debugging,
 }
 )
+
+
+import csv
+import os
+
+# CSV file to save stats
+stats_file = "training_stats.csv"
+
+# Write header once
+if not os.path.exists(stats_file):
+    with open(stats_file, mode="w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "step",
+            "train_loss",
+            "val_loss",
+            "data_load_mean",
+            "data_load_median",
+            "gpu_compute_mean",
+            "gpu_compute_median"
+        ])
 
 chars = ""
 data_used = '../data/vocab.txt'
@@ -71,7 +92,7 @@ int_to_strng = {i:ch for i,ch in enumerate(chars)}
 encode = lambda s: [strng_to_int[c] for c in s]
 decode = lambda l: ''.join([int_to_strng[i] for i in l])
 
-train_loader = PrefetchLoader(split="train", prefetch=8)
+train_loader = PrefetchLoader(split="train", prefetch=4)
 val_loader   = PrefetchLoader(split="val", prefetch=2)
 
 @torch.no_grad()
@@ -101,6 +122,10 @@ def estimate_loss():
 
 model = GPTLanguagemodel(vocab_size).to(device)
 #add torch compile 
+print('loading model parameters..')
+# with open('models/model-01.pkl', 'rb') as f:
+#     model = pickle.load(f)
+# print('loading model succesfully..')
 m = torch.compile(model)
 
 wandb.watch(m)
@@ -281,6 +306,12 @@ def train_model(model=model,
         "total_training_minutes": total_minutes
     })
 
+    # Save the model
+    os.makedirs('models', exist_ok=True)
+    with open('models/model-01.pkl', 'wb') as f:
+        pickle.dump(model, f)
+
+    print('Model saved successfully at models/model-01.pkl')
 train_model(
     model=model,
     optimizer=optimizer,

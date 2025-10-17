@@ -7,7 +7,7 @@ import random
 
 
 block_size = 512
-batch_size = 32*2
+batch_size = 48
 max_iters = 2
 learning_rate = 3e-4
 eval_iters = 1

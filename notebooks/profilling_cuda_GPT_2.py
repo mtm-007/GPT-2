@@ -129,41 +129,7 @@ def get_batch(split):
     x, y = x.to(device), y.to(device)
     return x,y
 
-# n = int(0.9*len(data))
 
-# train_data = data[:n]
-# val_data = data[n:]
-
-# train_data = train_data.to(device, non_blocking=True)
-# val_data = val_data.to(device, non_blocking=True)
-
-
-# def get_batch(split):
-#     """
-#     Efficient GPU-native batch sampling for sequence data.
-#     Returns x, y already on the GPU, contiguous.
-#     """
-#     data = train_data if split == 'train' else val_data
-#     # Sample batch indices directly on GPU
-#     ix = torch.randint(len(data) - block_size, (batch_size,), device=device)
-
-#     # Create a 2D tensor of shape (batch_size, block_size) for x
-#     x = data[ix[:, None] + torch.arange(block_size, device=device)]
-#     y = data[ix[:, None] + torch.arange(1, block_size + 1, device=device)]
-
-#     # Optional: make contiguous for better memory access in CUDA
-#     return x.contiguous(), y.contiguous()
-
-
-# def get_batch(split):
-#     data = train_data if split=='train' else val_data
-#     ix = torch.randint(len(data) - block_size, (batch_size,))
-#     #print(ix)
-#     x = data[ix[:, None] + torch.arange(block_size, device=device)]
-#     y = data[ix[:, None] + torch.arange(1, block_size + 1, device=device)]
-#     return x, y
-#     #x, y = x.to(device), y.to(device)
-#     #return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
 
 @torch.no_grad()
 def estimate_loss():
@@ -335,7 +301,7 @@ class GPTLanguagemodel(nn.Module):
 
 model = GPTLanguagemodel(vocab_size).to(device)
 #add torch compile 
-m = torch.compile(model,mode='max-autotune')
+m = torch.compile(model)
 
 wandb.watch(m)
 
@@ -445,95 +411,3 @@ wandb.log({"total_training_minutes": total_minutes})
 context = torch.zeros((1,1), dtype=torch.long, device=device)
 generated_chars = decode(m.generate(context, max_new_tokens=500)[0].tolist())
 print(generated_chars)
-
-
-
-
-
-
-# scaler = GradScaler()
-
-# start_time = datetime.now()
-
-# # Profile only limited steps (avoid big overhead)
-# profile_steps = 3  # or 50 if you really need longer profiling
-
-# for iter in range(max_iters):
-#     # ---- Evaluation & WandB logging ----
-#     if iter % eval_interval == 0:
-#         losses = estimate_loss()
-#         print(f"step {iter}: train {losses['train']:.4f}, val {losses['val']:.4f}")
-#         wandb.log({
-#             "step": iter,
-#             "train_loss": losses["train"],
-#             "val_loss": losses["val"]
-#         })
-
-#     xb, yb = get_batch("train")
-
-#     # ---- Profiling only for first few steps ----
-#     if iter < profile_steps:
-#         with profile(
-#             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-#             record_shapes=False,
-#             profile_memory=False,
-#             with_stack=False
-#         ) as prof:
-#             with record_function(f"train_step_{iter}"):
-#                 optimizer.zero_grad(set_to_none=True)
-#                 with autocast():
-#                     logits, loss = model(xb, yb)
-#                 scaler.scale(loss).backward()
-#                 scaler.step(optimizer)
-#                 scaler.update()
-
-#         # ---- Concise summary ----
-#         events = prof.key_averages()
-#         total_cuda_time = sum(e.cuda_time_total for e in events)
-#         top_ops = sorted(events, key=lambda e: e.cuda_time_total, reverse=True)[:5]
-
-#         print(f"\n---- Profiler Summary (Step {iter}) ----")
-#         for op in top_ops:
-#             print(f"{op.key:<40} {op.cuda_time_total/1000:.2f} ms")
-#         print(f"Total CUDA time: {total_cuda_time/1000:.2f} ms")
-
-#         # ---- Log to wandb (short summary) ----
-#         wandb.log({
-#             f"profiler/step_{iter}_cuda_ms": total_cuda_time / 1000,
-#             f"profiler/top_ops_step_{iter}": wandb.Html(
-#                 "<pre>" + "\n".join([f"{op.key}: {op.cuda_time_total/1000:.2f} ms" for op in top_ops]) + "</pre>"
-#             )
-#         })
-
-#         # Optional trace export for Chrome/TensorBoard
-#         # prof.export_chrome_trace(f"trace_step_{iter}.json")
-
-#     else:
-#         # ---- Regular training ----
-#         optimizer.zero_grad(set_to_none=True)
-#         with autocast():
-#             logits, loss = model(xb, yb)
-#         scaler.scale(loss).backward()
-#         scaler.step(optimizer)
-#         scaler.update()
-
-#     torch.cuda.empty_cache()
-
-# # ---- Training summary ----
-# print(f"\nFinal loss: {loss.item():.4f}")
-
-# end_time = datetime.now()
-# total_minutes = (end_time - start_time).total_seconds() / 60
-# print(f"\nTotal training time: {total_minutes:.2f} minutes")
-
-# wandb.log({"total_training_minutes": total_minutes})
-
-
-
-# #generation
-# context = torch.zeros((1,1), dtype=torch.long, device=device)
-# generated_chars = decode(m.generate(context, max_new_tokens=500)[0].tolist())
-# print(generated_chars)
-
-
-

@@ -14,7 +14,7 @@ torch.manual_seed(1337)
 
 
 block_size = 512
-batch_size = 32*2
+batch_size = 48
 
 
 chars = ""
@@ -92,17 +92,16 @@ def get_batch(split):
     return x.pin_memory(), y.pin_memory()
 
 class PrefetchLoader:
-    def __init__(self, split="train", prefetch=8, num_workers=-1):
+    def __init__(self, split="train", prefetch=4, num_threads=4):
         self.split = split
         self.queue = queue.Queue(maxsize=prefetch)
         # self.thread = threading.Thread(target=self._worker, daemon=True)
         # self.thread.start()
-        self.workers = []
-
-        for _ in range(num_workers):
+        self.threads = []
+        for _ in range(num_threads):
             t = threading.Thread(target=self._worker, daemon=True)
             t.start()
-            self.workers.append(t)
+            self.threads.append(t)
 
     def _worker(self):
         while True:
