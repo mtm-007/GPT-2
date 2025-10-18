@@ -7,14 +7,14 @@ import random
 
 
 block_size = 512
-batch_size = 48
-max_iters = 2
+batch_size = 8
+max_iters = 3001
 learning_rate = 3e-4
-eval_iters = 1
-eval_interval = 1
-n_embed = 384
-n_layer = 4
-n_head = 4
+eval_iters = 200
+eval_interval = 200
+n_embed = 768
+n_layer = 12
+n_head = 12
 dropout = 0.2
 
 class Head(nn.Module):
@@ -64,7 +64,8 @@ class FeedForward(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_embed, 4 * n_embed), # 4 is hyperparameter, Expanding dimentional for learning..hidden dim of FFN is 4 times (sweetspot)
-            nn.ReLU(),
+            #nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4* n_embed, n_embed),
             nn.Dropout(dropout),
         )

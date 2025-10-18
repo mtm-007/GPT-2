@@ -14,7 +14,7 @@ torch.manual_seed(1337)
 
 
 block_size = 512
-batch_size = 48
+batch_size = 8
 
 
 chars = ""
@@ -24,9 +24,7 @@ with open(data_used, 'r', encoding='utf-8')as f:
     chars = sorted(set(text))
 
 vocab_size = len(chars)
-
-size_mb = sys.getsizeof(text) / (1024 * 1024)
-print(f"Text size in memory: {size_mb:.2f} MB")
+print(f"Vocab size used for training: {vocab_size:.2f}")
 
 
 strng_to_int = {ch:i for i,ch in enumerate(chars)}
@@ -50,16 +48,17 @@ with open(original_training_file, "rb") as f:
 
 with open(sample_training_file, "wb") as f:
     f.write(chunk)
-print(f"✓ Created {sample_training_file}")
+#print(f"✓ Created {sample_training_file}")
 
 # Create 1GB sample from validation file (optional, or make it smaller)
-print("Creating validation sample...")
+
+#print("Creating validation sample...")
 with open(original_validation_file, "rb") as f:
     chunk = f.read(100 * 1024**2)  # Read 100MB for validation
 
 with open(sample_validation_file, "wb") as f:
     f.write(chunk)
-print(f"✓ Created {sample_validation_file}")
+#print(f"✓ Created {sample_validation_file}")
 
 
 def get_random_chunk(split):

@@ -45,8 +45,7 @@ with open(data_used, 'r', encoding='utf-8')as f:
     chars = sorted(set(text))
 
 vocab_size = len(chars)
-size_mb = sys.getsizeof(text) / (1024 * 1024)
-print(f"Vocab_size  in memory: {size_mb:.2f} MB")
+print(f"Vocab size used for training: {vocab_size:.2f}")
 
 strng_to_int = {ch:i for i,ch in enumerate(chars)}
 int_to_strng = {i:ch for i,ch in enumerate(chars)}

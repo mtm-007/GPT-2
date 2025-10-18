@@ -1,4 +1,4 @@
-import sys
+import sys,os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -14,7 +14,7 @@ from torch.cuda.amp import GradScaler, autocast
 # from torch.cuda.amp.grad_scaler import GradScaler
 # from torch.cuda.amp.autocast_mode import autocast
 
-from Transformer_functions import Head, MultiHeadAttention, FeedForward, Block, GPTLanguagemodel
+from Transformer_functions import  GPTLanguagemodel
 from data_batching_and_chunk_data import get_batch, PrefetchLoader
 
 
@@ -27,14 +27,14 @@ print(device)
 torch.manual_seed(1337)
 
 block_size = 512
-batch_size = 48
-max_iters = 1000
+batch_size = 8
+max_iters = 3001
 learning_rate = 3e-4
-eval_iters = 100
-eval_interval = 100
-n_embed = 384
-n_layer = 4
-n_head = 4
+eval_iters = 200
+eval_interval = 200
+n_embed = 768
+n_layer = 12
+n_head = 12
 dropout = 0.2
 
 # wandb tracking initialization
@@ -56,26 +56,6 @@ wandb.init(project = 'nano-gpt-tracking-test',
 )
 
 
-import csv
-import os
-
-# CSV file to save stats
-stats_file = "training_stats.csv"
-
-# Write header once
-if not os.path.exists(stats_file):
-    with open(stats_file, mode="w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "step",
-            "train_loss",
-            "val_loss",
-            "data_load_mean",
-            "data_load_median",
-            "gpu_compute_mean",
-            "gpu_compute_median"
-        ])
-
 chars = ""
 data_used = '../data/vocab.txt'
 with open(data_used, 'r', encoding='utf-8')as f:
@@ -83,16 +63,14 @@ with open(data_used, 'r', encoding='utf-8')as f:
     chars = sorted(set(text))
 
 vocab_size = len(chars)
-
-size_mb = sys.getsizeof(text) / (1024 * 1024)
-print(f"Vocab_size  in memory: {size_mb:.2f} MB")
+print(f"Vocab size used for training: {vocab_size:.2f}")
 
 strng_to_int = {ch:i for i,ch in enumerate(chars)}
 int_to_strng = {i:ch for i,ch in enumerate(chars)}
 encode = lambda s: [strng_to_int[c] for c in s]
 decode = lambda l: ''.join([int_to_strng[i] for i in l])
 
-train_loader = PrefetchLoader(split="train", prefetch=4)
+train_loader = PrefetchLoader(split="train", prefetch=4, num_threads=4)
 val_loader   = PrefetchLoader(split="val", prefetch=2)
 
 @torch.no_grad()
@@ -312,6 +290,7 @@ def train_model(model=model,
         pickle.dump(model, f)
 
     print('Model saved successfully at models/model-01.pkl')
+
 train_model(
     model=model,
     optimizer=optimizer,
