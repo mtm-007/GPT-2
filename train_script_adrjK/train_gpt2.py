@@ -1,0 +1,73 @@
+from dataclasses import dataclass
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+
+class CasualSelfAttention(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        
+class MLP(nn.Module):
+    """ 
+    the 4 * projection scaling is used to scale for higher representation learning, and its a parameter that can be changed 4 is used based experiments papers
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu = nn.GELU(approximate='tanh') # tanh approximation sued based on historcal performance in tensorflow, now?
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        return x
+
+class Block(nn.Module):
+
+    def __init__(self, config):
+        """
+        Andrej k. wisdom: attention acts as aggregation weighted sum function as Reduce function, the communcation part
+                         MLP(FFW) acts as a map function  here the thinking stage where applied to each token individiually and think about the information gathered from attention
+        """
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.attn = CasualSelfAttention(config)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.mlp = MLP(config)
+
+    
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x)) #single clear residual stream for the gradients to to branch the same backdrop gradient equally(+ backdrops equal grandients)
+        x = x + self.mlp(self.ln_2(x)) #the layernorm isnot applied to the residual
+        return x
+
+@dataclass
+class GPTConfig:
+    """
+    this config dataclass is implemented to pass parameters structurally with config instead of 
+    def __init__(self, vocab_size, n_embd, n_layer, n_head, block_size) and manually pass the parameters
+    """
+    block_size: int = 256
+    vocab_size: int = 65
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
+
+
+class GPT(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = nn.LayerNorm(config.n_embd),
+        ))
+        self.ln_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
