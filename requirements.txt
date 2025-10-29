@@ -6,6 +6,6 @@ pylzma
 ipykernel
 torch
 wandb
-transformers
+transformers==4.30.2
 tiktoken
 
