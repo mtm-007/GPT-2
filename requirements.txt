@@ -7,4 +7,5 @@ ipykernel
 torch
 wandb
 transformers
+tiktoken
 

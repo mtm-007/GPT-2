@@ -5,7 +5,7 @@ from torch.nn import functional as F
 import math
 
 
-device = "cuda" if torch.cuda.is_cuda_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class CasualSelfAttention(nn.Module):
 
@@ -172,5 +172,48 @@ class GPT(nn.Module):
         return model
     
 #----------------------------------------------
-model = GPT.from_pretrained('gpt2')
-print("didnt crash yet!")
+num_return_sequence = 5
+max_length =30
+
+#model = GPT.from_pretrained('gpt2')
+#with out using pretrained weights
+model = GPT(GPTConfig())
+model.eval()
+model.to(device)
+
+#prefix tokens
+import tiktoken
+enc = tiktoken.get_encoding("gpt2")
+tokens = enc.encode("Hello, Andrej Kharpathy is the King, best teacher for deep learning")
+tokens = torch.tensor(tokens, dtype=torch.long) #(16,)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequence,1) # (5, 16)
+x = tokens.to(device)
+
+#genetate right now x is (B,T) where B=5, T= 16
+#set seed to 42
+torch.manual_seed(42)
+if device =="cuda": torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    #forward the model to get the logits
+    with torch.no_grad():
+        logits = model(x) # (B, T, vocab_size)
+        #take the logits at the last position 
+        # only take the last column logits as indices are added one column per time for all rows(5,here), inefficient sampling 
+        logits = logits[:,-1,:] #(B,vocab_size)
+        #get the probabilities
+        probs = F.softmax(logits, dim=-1)
+        #do top-k sampling for 50 (huggingface pipeline default)
+        #topk_probs here becomes (5, 50), topk_indices is(5, 50)
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+        #select a token from the top-k probabilities
+        ix = torch.multinomial(topk_probs,1) #(B,1)
+        #gather the corresponding indices
+        xcol = torch.gather(topk_indices, -1, ix) #(B, 1)
+        #append to the sequence 
+        x = torch.cat((x, xcol), dim=1)
+
+#print the generated text
+for i in range(num_return_sequence):
+    tokens = x[i,:max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
