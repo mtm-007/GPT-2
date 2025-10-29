@@ -6,4 +6,5 @@ pylzma
 ipykernel
 torch
 wandb
+transformers
 
