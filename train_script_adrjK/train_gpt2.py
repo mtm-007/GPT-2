@@ -85,7 +85,7 @@ class GPTConfig:
     def __init__(self, vocab_size, n_embd, n_layer, n_head, block_size) and manually pass the parameters
     """
     block_size: int = 256
-    vocab_size: int = 65
+    vocab_size: int = 50257
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
@@ -173,11 +173,11 @@ class GPT(nn.Module):
     
 #----------------------------------------------
 num_return_sequence = 5
-max_length =30
+max_length =60
 
 #model = GPT.from_pretrained('gpt2')
 #with out using pretrained weights
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50257)) #vocab_size should be stated here as gpt2 configs
 model.eval()
 model.to(device)
 
