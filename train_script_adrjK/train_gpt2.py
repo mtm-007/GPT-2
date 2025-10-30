@@ -178,15 +178,45 @@ class GPT(nn.Module):
         return model
     
 #----------------------------------------------
+#dataloader
+class Dataloaderlite:
+    def __init__(self, B,T):
+        self.B = B
+        self.T = T
+
+        with open("../data/input.txt", "r")as f:
+            text = f.read()
+        enc = tiktoken.get_encoding("gpt2")
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens)// (B*T)} batches")
+
+        #state for batching over data, here B*T at a time
+        self.current_position = 0
+
+    def next_batch(self):
+        B,T = self.B, self.T
+        buf = self.tokens[self.current_position: self.current_position+B*T+1]
+        x = (buf[:-1]).view(B,T)
+        y = (buf[1:]).view(B,T)
+        #advance the postion in the tensor
+        self.current_position += B*T
+        #if loading the next batch would be out of bounds, reset
+        if self.current_position +(B*T+1) > len(self.tokens):
+            self.current_position = 0
+        return x, y
+#----------------------------------------------
 
 enc= tiktoken.get_encoding('gpt2')
-train_data = "../data/small_dataset/input.txt"
+train_data = "../data/input.txt"
 with open(train_data, 'r')as f:
     text = f.read()
 text = text[:1000]
 tokens = enc.encode(text)
 B, T = 4,32
 buf = torch.tensor(tokens[:B*T +1])
+buf = buf.to(device) #buf here is a tensor cant apply just buf.to(device) it will just create anew tensor in the device
 x = buf[:-1].view(B,T)
 y = buf[1:].view(B, T)
 
@@ -196,7 +226,16 @@ y = buf[1:].view(B, T)
 #get logits
 model = GPT(GPTConfig(vocab_size=50257)) #vocab_size use as gpt2 configs
 model.to(device)
-logits,loss = model(x,y)
+#logits,loss = model(x,y)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50*4):#iterations
+    optimizer.zero_grad()
+    logits, loss = model(x,y)
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}, loss: {loss.item()}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
+
 
 #sanity check loss should be -ln(1/50257)roughly 10.8
 sys.exit(0) #to skip sampling logic here
