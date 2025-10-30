@@ -18,6 +18,7 @@ class CasualSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         #output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1 # a flag for this medule
         #regularization
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -54,6 +55,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu = nn.GELU(approximate='tanh') # tanh approximation sued based on historcal performance in tensorflow, now?
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -106,7 +108,25 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        #weight sharing/Tying scheme, it saves 38M parameters space too  
+        self.transformer.wte.weight = self.lm_head.weight # the wte will copy lm head weight and be orphaned and cleaned later
+
+        #init params
+        self.apply(self._init_weights)
     
+    def _init_weights(self, module):
+        """ as per openai gpt2 initialization"""
+        if isinstance(module, nn.Linear):
+            std =0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std +=(2* self.config.n_layer)**-0.5 #initialization for the residial layers (1/sqrt(N layers))
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)#pytorch initializes bias as a uniform by default
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
     def forward(self, idx, targets=None):
         #idx is of shape (B,T)
         B,T = idx.size()
@@ -180,6 +200,7 @@ class GPT(nn.Module):
 #----------------------------------------------
 #dataloader
 class Dataloaderlite:
+    """ simple dataloader keeps batches in cpu"""
     def __init__(self, B,T):
         self.B = B
         self.T = T
@@ -208,18 +229,7 @@ class Dataloaderlite:
         return x, y
 #----------------------------------------------
 
-enc= tiktoken.get_encoding('gpt2')
-train_data = "../data/input.txt"
-with open(train_data, 'r')as f:
-    text = f.read()
-text = text[:1000]
-tokens = enc.encode(text)
-B, T = 4,32
-buf = torch.tensor(tokens[:B*T +1])
-buf = buf.to(device) #buf here is a tensor cant apply just buf.to(device) it will just create anew tensor in the device
-x = buf[:-1].view(B,T)
-y = buf[1:].view(B, T)
-
+train_loader = Dataloaderlite(B=4,T=32)
 #model = GPT.from_pretrained('gpt2')
 #with out using pretrained weights
 
@@ -229,7 +239,9 @@ model.to(device)
 #logits,loss = model(x,y)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(50*4):#iterations
+for i in range(50):#iterations
+    x,y = train_loader.next_batch()
+    x,y = x.to(device), y.to(device) #move the batches from cpu to device
     optimizer.zero_grad()
     logits, loss = model(x,y)
     loss.backward()
@@ -252,8 +264,9 @@ x = tokens.to(device)
 
 #genetate right now x is (B,T) where B=5, T= 16
 #set seed to 42
-torch.manual_seed(42)
-if device =="cuda": torch.cuda.manual_seed(42)
+torch.manual_seed(1337)
+if torch.cuda.is_available(): torch.cuda.manual_seed(1337)
+
 while x.size(1) < max_length:
     #forward the model to get the logits
     with torch.no_grad():
