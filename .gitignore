@@ -10,8 +10,10 @@ __pycache__/
 #large data
 /data
 
+
+#
 #wandb tracking data
-/wandb
+wandb/
 # Distribution / packaging
 .Python
 build/

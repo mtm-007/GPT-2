@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
+import sys
+import tiktoken
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -105,7 +107,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         #idx is of shape (B,T)
         B,T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block_size is {self.config.block_size}"
@@ -120,7 +122,11 @@ class GPT(nn.Module):
         #forward the final layernorm and the classifier
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x) #(B,T, vocab_size)
-        return logits
+        loss = None
+        if targets is not None:
+            #cross entropy doesnt take 3d dim, so flatten to 2d dim: inputs->(B*T, vocab_size), targets flat 1d (B*T)
+            loss = F.cross_entropy(logits.view(-1,logits.size(-1)), targets.view(-1))
+        return logits,loss
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -148,7 +154,7 @@ class GPT(nn.Module):
 
         #init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
-        sd_hf = model_hf.state_dict()
+        sd_hf = model_hf.state_dict() 
         
         #copy while ensuring all of the parameters are aligned and match in names and shapes
         sd_keys_hf = sd_hf.keys()
@@ -172,17 +178,33 @@ class GPT(nn.Module):
         return model
     
 #----------------------------------------------
-num_return_sequence = 5
-max_length =60
+
+enc= tiktoken.get_encoding('gpt2')
+train_data = "../data/small_dataset/input.txt"
+with open(train_data, 'r')as f:
+    text = f.read()
+text = text[:1000]
+tokens = enc.encode(text)
+B, T = 4,32
+buf = torch.tensor(tokens[:B*T +1])
+x = buf[:-1].view(B,T)
+y = buf[1:].view(B, T)
 
 #model = GPT.from_pretrained('gpt2')
 #with out using pretrained weights
-model = GPT(GPTConfig(vocab_size=50257)) #vocab_size should be stated here as gpt2 configs
-model.eval()
-model.to(device)
 
+#get logits
+model = GPT(GPTConfig(vocab_size=50257)) #vocab_size use as gpt2 configs
+model.to(device)
+logits,loss = model(x,y)
+
+#sanity check loss should be -ln(1/50257)roughly 10.8
+sys.exit(0) #to skip sampling logic here
+
+model.eval()
+num_return_sequence = 5
+max_length =60
 #prefix tokens
-import tiktoken
 enc = tiktoken.get_encoding("gpt2")
 tokens = enc.encode("Hello, Andrej Kharpathy is the King, best teacher for deep learning")
 tokens = torch.tensor(tokens, dtype=torch.long) #(16,)
