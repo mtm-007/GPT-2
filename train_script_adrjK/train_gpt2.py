@@ -248,7 +248,7 @@ def cleanup_memory(*tensors):
 #----------------------------------------------
 
 train_loader = Dataloaderlite(B=2,T=1024)
-#set to tf32 when available
+#set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
 #model = GPT.from_pretrained('gpt2')
 #with out using pretrained weights
