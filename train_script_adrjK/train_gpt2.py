@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import math
 import sys
+import time
 import tiktoken
 
 
@@ -15,6 +16,7 @@ class CasualSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         #key, query, value projection for all heads, but in a batch
+        #one fused (for speed and convience but same number of params) big layer than 3 three separate layers for K,Q,V layers
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         #output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
@@ -43,6 +45,7 @@ class CasualSelfAttention(nn.Module):
         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1,2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         #output projection
+        #c_proj is used to project it back to the model embedding space so that the next layer can use it
         y = self.c_proj(y)
         return y
         
@@ -88,11 +91,11 @@ class GPTConfig:
     this config dataclass is implemented to pass parameters structurally with config instead of 
     def __init__(self, vocab_size, n_embd, n_layer, n_head, block_size) and manually pass the parameters
     """
-    block_size: int = 256
+    block_size: int = 1024
     vocab_size: int = 50257
     n_layer: int = 6
     n_head: int = 6
-    n_embd: int = 384
+    n_embd: int = 768
 
 
 class GPT(nn.Module):
@@ -107,6 +110,7 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd),
         ))
+        #biggest MatMul 768 to 50257 -> 38.6M params
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         #weight sharing/Tying scheme, it saves 38M parameters space too  
@@ -227,9 +231,25 @@ class Dataloaderlite:
         if self.current_position +(B*T+1) > len(self.tokens):
             self.current_position = 0
         return x, y
+
+import torch
+import gc
+
+def cleanup_memory(*tensors):
+    """ Deletes the provided tensors, triggers garbage collection,
+        and empties CUDA cache if available. """
+    for t in tensors:
+        del t
+    gc.collect()
+    
+    # Only if CUDA is available
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 #----------------------------------------------
 
-train_loader = Dataloaderlite(B=4,T=32)
+train_loader = Dataloaderlite(B=2,T=1024)
+#set to tf32 when available
+torch.set_float32_matmul_precision("high")
 #model = GPT.from_pretrained('gpt2')
 #with out using pretrained weights
 
@@ -240,14 +260,22 @@ model.to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):#iterations
+    t0=time.time()
     x,y = train_loader.next_batch()
     x,y = x.to(device), y.to(device) #move the batches from cpu to device
     optimizer.zero_grad()
     logits, loss = model(x,y)
+    #import code;code.interact(local=locals()) #inline python shell, manual debugger
     loss.backward()
     optimizer.step()
-    print(f"step {i}, loss: {loss.item()}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
+    #torch.cuda.synchronize()
+    t1=time.time()
+    dt= (t1-t0)*1000 #in miliseconds
+    tokens_per_sec = (train_loader.B*train_loader.T)/(t1-t0)
+    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, token/sec throughput: {tokens_per_sec:.2f}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
 
+    #call garbage collector
+    cleanup_memory(x,y,loss)
 
 #sanity check loss should be -ln(1/50257)roughly 10.8
 sys.exit(0) #to skip sampling logic here

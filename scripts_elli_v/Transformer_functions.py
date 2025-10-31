@@ -18,7 +18,9 @@ n_head = 12
 dropout = 0.2
 
 class Head(nn.Module):
-    """ one head of self attention"""
+    """ one head of self attention,
+        Here three separate layers are used for Key, Query, and Value layers,
+        other option is one fused 3 time bigger later C_attn projection layer."""
     def __init__(self, head_size):
         super().__init__()
         self.key = nn.Linear(n_embed, head_size, bias=False)
@@ -50,6 +52,7 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, n_head, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(n_head)])
+        #to project it back to the model embedding space so that the next layer can use it:
         self.proj = nn.Linear(head_size * n_head, n_embed) # bringing back n_embed from: head_size = n_embed // n_head
         self.dropout = nn.Dropout(dropout)
 
