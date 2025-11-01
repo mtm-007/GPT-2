@@ -47,7 +47,10 @@ class CasualSelfAttention(nn.Module):
         # y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         # y = y.transpose(1,2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
+        #flash attention
         y =F.scaled_dot_product_attention(q,k,v, is_causal=True)
+        #transposing and reshaping after flash attention
+        y = y.transpose(1,2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         #output projection
         #c_proj is used to project it back to the model embedding space so that the next layer can use it
@@ -259,7 +262,7 @@ torch.set_float32_matmul_precision("high")
 #with out using pretrained weights
 
 #get logits
-model = GPT(GPTConfig(vocab_size=50257)) #vocab_size use as gpt2 configs
+model = GPT(GPTConfig(vocab_size=50304)) #vocab_size use better 8,16,32 divisble number
 model.to(device)
 model= torch.compile(model)
 
