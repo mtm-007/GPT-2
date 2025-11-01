@@ -9,6 +9,7 @@ import tiktoken
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print("device used: ", device)
 
 class CasualSelfAttention(nn.Module):
 
@@ -256,7 +257,7 @@ torch.set_float32_matmul_precision("high")
 #get logits
 model = GPT(GPTConfig(vocab_size=50257)) #vocab_size use as gpt2 configs
 model.to(device)
-#logits,loss = model(x,y)
+model= torch.compile(model)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):#iterations
@@ -268,7 +269,7 @@ for i in range(50):#iterations
     #the logits activations changes to bf16 but the model weight parameters stay at ft32
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits, loss = model(x,y)
-    #import code;code.interact(local=locals()) #inline python shell, manual debugger
+        #import code;code.interact(local=locals()) #inline python shell, manual debugger
     loss.backward()
     optimizer.step()
     #torch.cuda.synchronize()
