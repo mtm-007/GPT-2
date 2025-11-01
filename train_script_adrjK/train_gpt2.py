@@ -264,7 +264,10 @@ for i in range(50):#iterations
     x,y = train_loader.next_batch()
     x,y = x.to(device), y.to(device) #move the batches from cpu to device
     optimizer.zero_grad()
-    logits, loss = model(x,y)
+    #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
+    #the logits activations changes to bf16 but the model weight parameters stay at ft32
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x,y)
     #import code;code.interact(local=locals()) #inline python shell, manual debugger
     loss.backward()
     optimizer.step()
