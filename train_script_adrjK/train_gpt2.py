@@ -100,7 +100,7 @@ class GPTConfig:
     def __init__(self, vocab_size, n_embd, n_layer, n_head, block_size) and manually pass the parameters
     """
     block_size: int = 1024
-    vocab_size: int = 50257
+    vocab_size: int = 502304
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
@@ -253,6 +253,16 @@ def cleanup_memory(*tensors):
     # Only if CUDA is available
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    
+"""
+gradient clipping, what actually happens
+total_norm = sqrt(sum(p.grad.norm(2)**2 for p in model.parameters()))
+if total_norm > max_norm:
+    scale = max_norm / (total_norm + 1e-6)
+    for p in model.parameters():
+        p.grad.mul_(scale)
+return total_norm
+"""
 #----------------------------------------------
 
 train_loader = Dataloaderlite(B=4,T=1024)
@@ -266,8 +276,28 @@ model = GPT(GPTConfig(vocab_size=50304)) #vocab_size use better 8,16,32 divisble
 model.to(device)
 model= torch.compile(model)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(50):#iterations
+#learning rate scheduler
+max_lr = 6e-4
+min_lr = max_lr*0.1
+warm_up_steps = 10
+max_steps = 84
+
+def get_lr(it):
+    #1. linear warmup for warmup_iters steps
+    if it < warm_up_steps:
+        return max_lr * (it+1)/warm_up_steps
+    #2. if lr > lr_decay_iters, return min learning rate
+    if it > max_steps:
+        return min_lr
+    #3. in between, use cosine decay to min learning rate
+    decay_ratio = (it - warm_up_steps)/ (max_steps - warm_up_steps)
+    assert 0 <= decay_ratio <=1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) #coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
+
+#optimizer
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+for step in range(max_steps):#iterations
     t0=time.time()
     x,y = train_loader.next_batch()
     x,y = x.to(device), y.to(device) #move the batches from cpu to device
@@ -278,12 +308,18 @@ for i in range(50):#iterations
         logits, loss = model(x,y)
         #import code;code.interact(local=locals()) #inline python shell, manual debugger
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    #determine and set the learning rate for the iteration
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     #torch.cuda.synchronize()
     t1=time.time()
-    dt= (t1-t0)*1000 #in miliseconds
-    tokens_per_sec = (train_loader.B*train_loader.T)/(t1-t0)
-    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, token/sec throughput: {tokens_per_sec:.2f}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
+    dt= (t1-t0) #in diff in seconds
+    tokens_processed = train_loader.B*train_loader.T
+    tokens_per_sec = tokens_processed/ dt
+    print(f"step {step:4d}, loss: {loss.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, dt: {dt*1000:.2f}ms, token/sec throughput: {tokens_per_sec:.2f}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
 
     #call garbage collector
     cleanup_memory(x,y,loss)
