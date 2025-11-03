@@ -287,11 +287,11 @@ return total_norm
 """
 #----------------------------------------------
 
-total_batch_size = 524288 #2**19, ~0.5M tokens
+total_batch_size = 4 #2**19, ~0.5M tokens
 B= 4
 T = 1024
-assert total_batch_size % (B *T) ==0, "make sure its divisible by B*T"
-grad_accum_steps = total_batch_size // (B*T)
+#assert total_batch_size % (B *T) ==0, "make sure its divisible by B*T"
+grad_accum_steps = 1 #total_batch_size // (B*T)
 print(f"total desired batch size: {total_batch_size}")
 print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
@@ -326,33 +326,35 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 #optimizer
-#optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, betas=(0.9, 0.95), eps=1e-8)
+#optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 for step in range(max_steps):#iterations
     t0=time.time()
-    for i in range(grad_accum_steps):
+    optimizer.zero_grad()
+    loss_accum = 0.0
+    for micro_step_batch in range(grad_accum_steps):
         x,y = train_loader.next_batch()
         x,y = x.to(device), y.to(device) #move the batches from cpu to device
-        optimizer.zero_grad()
         #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
         #the logits activations changes to bf16 but the model weight parameters stay at ft32
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device, dtype=torch.float16):
             logits, loss = model(x,y)
             #import code;code.interact(local=locals()) #inline python shell, manual debugger
         loss = loss/grad_accum_steps #scale down to cover the sum over the gradient accum stage
+        loss_accum += loss.detach()
         loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     #determine and set the learning rate for the iteration
-    lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+    # lr = get_lr(step)
+    # for param_group in optimizer.param_groups:
+    #     param_group['lr'] = lr
     optimizer.step()
     #torch.cuda.synchronize()
     t1=time.time()
     dt= (t1-t0) #in diff in seconds
-    tokens_processed = train_loader.B*train_loader.T
+    tokens_processed = train_loader.B*train_loader.T * grad_accum_steps
     tokens_per_sec = tokens_processed/ dt
-    print(f"step {step:4d}, loss: {loss.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, dt: {dt*1000:.2f}ms, token/sec throughput: {tokens_per_sec:.2f}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
+    print(f"step {step:4d}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, dt: {dt*1000:.2f}ms, token/sec throughput: {tokens_per_sec:.2f}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
 
     #call garbage collector
     cleanup_memory(x,y,loss)
