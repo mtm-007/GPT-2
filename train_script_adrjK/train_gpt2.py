@@ -287,6 +287,14 @@ return total_norm
 """
 #----------------------------------------------
 
+total_batch_size = 524288 #2**19, ~0.5M tokens
+B= 4
+T = 1024
+assert total_batch_size % (B *T) ==0, "make sure its divisible by B*T"
+grad_accum_steps = total_batch_size // (B*T)
+print(f"total desired batch size: {total_batch_size}")
+print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
 train_loader = Dataloaderlite(B=4,T=1024)
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
@@ -322,15 +330,17 @@ def get_lr(it):
 optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 for step in range(max_steps):#iterations
     t0=time.time()
-    x,y = train_loader.next_batch()
-    x,y = x.to(device), y.to(device) #move the batches from cpu to device
-    optimizer.zero_grad()
-    #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
-    #the logits activations changes to bf16 but the model weight parameters stay at ft32
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x,y)
-        #import code;code.interact(local=locals()) #inline python shell, manual debugger
-    loss.backward()
+    for i in range(grad_accum_steps):
+        x,y = train_loader.next_batch()
+        x,y = x.to(device), y.to(device) #move the batches from cpu to device
+        optimizer.zero_grad()
+        #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
+        #the logits activations changes to bf16 but the model weight parameters stay at ft32
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x,y)
+            #import code;code.interact(local=locals()) #inline python shell, manual debugger
+        loss = loss/grad_accum_steps #scale down to cover the sum over the gradient accum stage
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     #determine and set the learning rate for the iteration
     lr = get_lr(step)
