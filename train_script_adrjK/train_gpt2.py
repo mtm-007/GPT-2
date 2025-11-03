@@ -1,12 +1,15 @@
 from dataclasses import dataclass
 import torch
+from torch.cpu import is_available
 import torch.nn as nn
 from torch.nn import functional as F
 import math
-import sys
+import sys,os
 import time
 import tiktoken
 import inspect
+import torch
+import gc
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("device used: ", device)
@@ -262,9 +265,6 @@ class Dataloaderlite:
             self.current_position = 0
         return x, y
 
-import torch
-import gc
-
 def cleanup_memory(*tensors):
     """ Deletes the provided tensors, triggers garbage collection,
         and empties CUDA cache if available. """
@@ -285,17 +285,46 @@ if total_norm > max_norm:
         p.grad.mul_(scale)
 return total_norm
 """
+
+#---------Distributed training------
+#run the training loop
+from torch.distributed import init_process_group, destroy_process_group
+#set up DDP (distributed data parallel)
+#torchrun command sets the new env variables RANK, LOCAL_RANK, and WORLD_SIZE
+ddp = int(os.environ.get('RANK', -1)) != -1 #is this a ddp run
+if ddp:
+    #use of DDP atm demands CUDA, we set the device appropriately according to rank
+    assert torch.cuda.is_available(), "for now we need CUDA for DDP"
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f"cuda:(ddp_local_rank)"
+    torch.cuda.set_device(device)
+    master_process = ddp_rank ==0 #this process will do logging, checkpointing etc.
+else:
+    #vanila, non-DDP run
+    ddp_rank=0
+    ddp_local_rank=0
+    ddp_world_size=1
+    master_process=True
+    #auto detect device
+    device = "cpu"
+    if torch.cuda.is_available(): device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    print(f"using device: {device}, in the DDP stage if available")
 #----------------------------------------------
 
-total_batch_size = 4 #2**19, ~0.5M tokens
-B= 4
+total_batch_size = 32#2**19 #~0.5M tokens
+B = 4
 T = 1024
 #assert total_batch_size % (B *T) ==0, "make sure its divisible by B*T"
-grad_accum_steps = 1 #total_batch_size // (B*T)
+grad_accum_steps = 8#total_batch_size // (B*T)
 print(f"total desired batch size: {total_batch_size}")
 print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-train_loader = Dataloaderlite(B=4,T=1024)
+train_loader = Dataloaderlite(B=B,T=T)
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
 #model = GPT.from_pretrained('gpt2')
@@ -326,8 +355,8 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 #optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, betas=(0.9, 0.95), eps=1e-8)
-#optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+#optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, betas=(0.9, 0.95), eps=1e-8)
+optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 for step in range(max_steps):#iterations
     t0=time.time()
     optimizer.zero_grad()
@@ -337,7 +366,7 @@ for step in range(max_steps):#iterations
         x,y = x.to(device), y.to(device) #move the batches from cpu to device
         #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
         #the logits activations changes to bf16 but the model weight parameters stay at ft32
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(x,y)
             #import code;code.interact(local=locals()) #inline python shell, manual debugger
         loss = loss/grad_accum_steps #scale down to cover the sum over the gradient accum stage
@@ -345,9 +374,9 @@ for step in range(max_steps):#iterations
         loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     #determine and set the learning rate for the iteration
-    # lr = get_lr(step)
-    # for param_group in optimizer.param_groups:
-    #     param_group['lr'] = lr
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     #torch.cuda.synchronize()
     t1=time.time()
