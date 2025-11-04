@@ -310,6 +310,7 @@ if ddp:
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
     master_process = ddp_rank ==0 #this process will do logging, checkpointing etc.
+    
 else:
     #vanila, non-DDP run
     ddp_rank=0
@@ -324,11 +325,11 @@ else:
     print(f"using device: {device}, in the DDP stage if available")
 #----------------------------------------------
 
-total_batch_size = 8#2**19 #~0.5M tokens
-B = 4
+total_batch_size = 32768 #524288 #2**19 #~0.5M tokens
+B = 8
 T = 1024
-#assert total_batch_size % (B *T * ddp_world_size) ==0, "make sure its divisible by B*T"
-grad_accum_steps = 2#total_batch_size // (B*T*ddp_world_size)
+assert total_batch_size % (B *T * ddp_world_size) ==0, "make sure its divisible by B*T"
+grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
 if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
@@ -349,6 +350,7 @@ model.to(device)
 model= torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+raw_model = model.module if ddp else model #always contain the raw unwrapped model
 
 #learning rate scheduler
 max_lr = 6e-4
@@ -370,8 +372,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 #optimizer
-#optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, betas=(0.9, 0.95), eps=1e-8)
-optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 for step in range(max_steps):#iterations
     t0=time.time()
     optimizer.zero_grad()
@@ -381,7 +382,7 @@ for step in range(max_steps):#iterations
         x,y = x.to(device), y.to(device) #move the batches from cpu to device
         #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
         #the logits activations changes to bf16 but the model weight parameters stay at ft32
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device, dtype=torch.float16):
             logits, loss = model(x,y)
             #import code;code.interact(local=locals()) #inline python shell, manual debugger
         loss = loss/grad_accum_steps #scale down to cover the sum over the gradient accum stage
@@ -397,7 +398,7 @@ for step in range(max_steps):#iterations
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
-    #torch.cuda.synchronize()
+    torch.cuda.synchronize()
     t1=time.time()
     dt= (t1-t0) #in diff in seconds
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
