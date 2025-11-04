@@ -8,8 +8,8 @@ import sys,os
 import time
 import tiktoken
 import inspect
-import torch
 import gc
+import numpy as np
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("device used: ", device)
@@ -236,25 +236,47 @@ class GPT(nn.Module):
         return optimizer
 #----------------------------------------------
 #dataloader
+def load_tokens(filename):
+    npt = np.load(filename)
+    npt = npt.astpe(np.int32) # per kharpathy Readme PR update
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
+
 class Dataloaderlite:
     """ simple dataloader keeps batches in cpu"""
-    def __init__(self, B,T, process_rank, num_processes):
+    def __init__(self, B,T, process_rank, num_processes, split):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
+        assert split in {"train", "val"}
+
+        #get the shard filename
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        if master_process:
+            print(f"found {len(shards)} shards for the split {split}")
+        
+        #split, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
 
         #at init load tokens from disk and store them to memory
-        with open("../data/input.txt", "r")as f:
-            text = f.read()
-        enc = tiktoken.get_encoding("gpt2")
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens")
-        #print(f"1 epoch = {len(self.tokens)// (B*T)} batches")
+        # with open("../data/input.txt", "r")as f:
+        #     text = f.read()
+        # enc = tiktoken.get_encoding("gpt2")
+        # tokens = enc.encode(text)
+        # self.tokens = torch.tensor(tokens)
+        # print(f"loaded {len(self.tokens)} tokens")
+        # #print(f"1 epoch = {len(self.tokens)// (B*T)} batches")
 
-        #state for batching over data, here B*T at a time
-        self.current_position = self.B * self.T * self.process_rank
+        # #state for batching over data, here B*T at a time
+        # self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         B,T = self.B, self.T
@@ -263,8 +285,10 @@ class Dataloaderlite:
         y = (buf[1:]).view(B,T)
         #advance the postion in the tensor
         self.current_position += B*T*self.num_processes
-        #if loading the next batch would be out of bounds, reset
-        if self.current_position +(B*T*self.num_processes+1) > len(self.tokens):
+        #if loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B*T*self.num_processes+1) > len(self.tokens):
+            self.current_shard = (self.current_shard +1) %len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank
         return x, y
 
@@ -338,7 +362,8 @@ if master_process:
 # print("test success!")
 # import sys; sys.exit(0)
 
-train_loader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size)
+train_loader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
+
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
 #model = GPT.from_pretrained('gpt2')
@@ -355,8 +380,8 @@ raw_model = model.module if ddp else model #always contain the raw unwrapped mod
 #learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr*0.1
-warm_up_steps = 10
-max_steps = 50
+warm_up_steps = 715
+max_steps = 19073
 
 def get_lr(it):
     #1. linear warmup for warmup_iters steps
