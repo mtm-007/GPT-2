@@ -361,7 +361,12 @@ else:
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = "mps"
     print(f"using device: {device}, in the DDP stage if available")
+
+device_type = "cuda" if device.startswith("cuda") else "cpu"
 #----------------------------------------------
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
 
 enc = tiktoken.get_encoding("gpt2")
 
@@ -450,6 +455,18 @@ for step in range(max_steps):#iterations
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+            if step > 0 and (step % 5000 == 0 or last_step):
+                #optionally write model checkpoints
+                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'config': raw_model.config,
+                    'step': step,
+                    'val_loss': val_loss_accum.item()
+                }
+                #you might also want to add optimizer.state() and
+                #rng seeds etc., if you wanted to more exactly resume training
+                torch.save(checkpoint, checkpoint_path)
     
     #once in a while evalute hellaSwag
     if (step %250 ==0 or last_step) and (not use_compile):
@@ -569,45 +586,3 @@ for step in range(max_steps):#iterations
 if ddp:
     destroy_process_group()
     
-#sanity check loss should be -ln(1/50257)roughly 10.8
-sys.exit(0) #to skip sampling logic here
-
-model.eval()
-num_return_sequence = 5
-max_length =60
-#prefix tokens
-enc = tiktoken.get_encoding("gpt2")
-tokens = enc.encode("Hello, Andrej Kharpathy is the King, best teacher for deep learning")
-tokens = torch.tensor(tokens, dtype=torch.long) #(16,)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequence,1) # (5, 16)
-x = tokens.to(device)
-
-#genetate right now x is (B,T) where B=5, T= 16
-#set seed to 42
-torch.manual_seed(1337)
-if torch.cuda.is_available(): torch.cuda.manual_seed(1337)
-
-while x.size(1) < max_length:
-    #forward the model to get the logits
-    with torch.no_grad():
-        logits = model(x) # (B, T, vocab_size)
-        #take the logits at the last position 
-        # only take the last column logits as indices are added one column per time for all rows(5,here), inefficient sampling 
-        logits = logits[:,-1,:] #(B,vocab_size)
-        #get the probabilities
-        probs = F.softmax(logits, dim=-1)
-        #do top-k sampling for 50 (huggingface pipeline default)
-        #topk_probs here becomes (5, 50), topk_indices is(5, 50)
-        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-        #select a token from the top-k probabilities
-        ix = torch.multinomial(topk_probs,1) #(B,1)
-        #gather the corresponding indices
-        xcol = torch.gather(topk_indices, -1, ix) #(B, 1)
-        #append to the sequence 
-        x = torch.cat((x, xcol), dim=1)
-
-#print the generated text
-for i in range(num_return_sequence):
-    tokens = x[i,:max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(">", decoded)
