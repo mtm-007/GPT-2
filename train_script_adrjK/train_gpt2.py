@@ -254,29 +254,20 @@ class Dataloaderlite:
         #get the shard filename
         data_root = "edu_fineweb10B"
         shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
         shards = sorted(shards)
         shards = [os.path.join(data_root, s) for s in shards]
         self.shards = shards
         assert len(shards) > 0, f"no shards found for split {split}"
         if master_process:
             print(f"found {len(shards)} shards for the split {split}")
+        self.reset()
         
-        #split, init at shard zero
+    def reset(self):
+        #state, init at shard zero
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
-
-        #at init load tokens from disk and store them to memory
-        # with open("../data/input.txt", "r")as f:
-        #     text = f.read()
-        # enc = tiktoken.get_encoding("gpt2")
-        # tokens = enc.encode(text)
-        # self.tokens = torch.tensor(tokens)
-        # print(f"loaded {len(self.tokens)} tokens")
-        # #print(f"1 epoch = {len(self.tokens)// (B*T)} batches")
-
-        # #state for batching over data, here B*T at a time
-        # self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         B,T = self.B, self.T
@@ -349,6 +340,8 @@ else:
     print(f"using device: {device}, in the DDP stage if available")
 #----------------------------------------------
 
+enc = tiktoken.get_encoding("gpt2")
+
 total_batch_size = 32768 #524288 #2**19 #~0.5M tokens
 B = 8
 T = 1024
@@ -362,7 +355,9 @@ if master_process:
 # print("test success!")
 # import sys; sys.exit(0)
 
-train_loader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
+train_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
+val_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+
 
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
@@ -398,18 +393,85 @@ def get_lr(it):
 
 #optimizer
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+
 for step in range(max_steps):#iterations
     t0=time.time()
+
+    #once in a while evaluator our evaluation loss
+    if step %100 ==0:
+        model.eval()
+        val_dataloader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x,y = val_dataloader.next_batch()
+                x,y = x.to(device),y.to(device)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(x,y)
+                loss = loss / val_loss_steps
+                val_loss_accum +=loss.detach()
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if master_process:
+            print(f"validation loss: {val_loss_accum.item():.4f}")
+    
+
+    #once ina while generate from the model (except step 0, which is noise)
+    #disabled because torch.compile throws a scary error to be solved as Andrej Kharpathy
+    #if you disable torch.compile, this code works fine
+    if step >0 and step %100 ==0 and False:
+        model.eval()
+        num_return_sequence = 4
+        max_length = 32
+        tokens = enc.encode("Hello, I'm a Andrej Kharpathy is my king language model,")
+        tokens = torch.tensor(tokens, dtype=torch.long) #(16,)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequence,1) # (5, 16)
+        xgen = tokens.to(device)
+        #create a seperate object generator for the random number to be outside the training loop and not intefer with the global training seed
+        sample_rng = torch.Generator(device=device)
+        sample_rng.manual_seed(42 + ddp_rank) #every rank is a different random seed
+        while xgen.size(1) < max_length:
+            #forward the model to get the logits
+            with torch.no_grad():
+                logits, loss = model(xgen) #(B, T, vocab_size)
+                #take the logits at the last position
+                logits = logits[:,-1, :] #(B, vocab_size)
+                #get the probabilities
+                probs = F.softmax(logits, dim=-1)
+                #do top-k sampling for 50 (huggingface pipeline default)
+                #topk_probs here becomes (5, 50), topk_indices is(5, 50)
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                #select a token from the top-k probabilities
+                #note multinomial does not demand the input to sum to 1
+                ix = torch.multinomial(topk_probs,1, generator=sample_rng) #(B,1)
+                #gather the corresponding indices
+                xcol = torch.gather(topk_indices, -1, ix) #(B, 1)
+                #append to the sequence 
+                xgen = torch.cat((xgen, xcol), dim=1)
+            
+            # print the generated text
+            for i in range(num_return_sequence):
+                tokens = xgen[i, :max_length].tolist()
+                decoded = enc.decode(tokens)
+                print(f"rank {ddp_rank} sample {i}: {decoded}")
+
+    #training loop
+    model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     for micro_step_batch in range(grad_accum_steps):
-        x,y = train_loader.next_batch()
+        x,y = train_dataloader.next_batch()
         x,y = x.to(device), y.to(device) #move the batches from cpu to device
         #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
         #the logits activations changes to bf16 but the model weight parameters stay at ft32
         with torch.autocast(device_type=device, dtype=torch.float16):
             logits, loss = model(x,y)
             #import code;code.interact(local=locals()) #inline python shell, manual debugger
+        #we have to scale the loss down to account for gradient accumulation,
+        #because the gradients just add on each successive backwards().
+        #addition of the gradients corresponds to a SUM in the objective, but
+        #instead of a SUM we want MEAN. Scale the loss here so it comes out right
         loss = loss/grad_accum_steps #scale down to cover the sum over the gradient accum stage
         loss_accum += loss.detach()
         if ddp:
@@ -426,7 +488,7 @@ for step in range(max_steps):#iterations
     torch.cuda.synchronize()
     t1=time.time()
     dt= (t1-t0) #in diff in seconds
-    tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
+    tokens_processed = train_dataloader.B * train_dataloader.T * grad_accum_steps * ddp_world_size
     tokens_per_sec = tokens_processed/ dt
     if master_process:
         print(f"step {step:4d}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, dt: {dt*1000:.2f}ms, token/sec throughput: {tokens_per_sec:.2f}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
