@@ -5,8 +5,10 @@ import time
 import tiktoken
 import inspect
 import gc
+import wandb
 import numpy as np
 from dataclasses import dataclass
+from dataclasses import asdict
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -14,6 +16,7 @@ from hellaswag_evals import render_example, iterate_examples
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("device used: ", device)
+wandb.log({"device": device})
 
 class CasualSelfAttention(nn.Module):
 
@@ -170,6 +173,7 @@ class GPT(nn.Module):
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
         from transformers import GPT2LMHeadModel
         print("loading weights from pretrained gpt: %s" % model_type)
+        wandb.log({"loading_weight_from_pretrained_gpt": model_type})
 
         config_args = {
             'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  #124M params
@@ -213,7 +217,7 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
         return model
     
-    def configure_optimizers(self, weight_decay, learning_rate, device):
+    def configure_optimizers(self, weight_decay, learning_rate, device_type):
         #start with all of the candidate parameters (that require grad)
         param_dict = {pn: p for pn, p in self.named_parameters()}
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
@@ -229,10 +233,19 @@ class GPT(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        
+        wandb.log({
+        "num_decay_params": num_decay_params,
+        "num_nodecay_params": num_nodecay_params,
+        "num_decay_tensors": len(decay_params),
+        "num_nodecay_tensors": len(nodecay_params)
+        })
+
         #create AdamW optimizer and use fused version if available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and 'cuda' in device
+        use_fused = fused_available and device_type == "cuda"
         print(f"using fused AdamW: {use_fused}")
+        wandb.log({"use_fused_adamw": use_fused})
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 #----------------------------------------------
@@ -262,6 +275,7 @@ class Dataloaderlite:
         assert len(shards) > 0, f"no shards found for split {split}"
         if master_process:
             print(f"found {len(shards)} shards for the split {split}")
+            wandb.log({"num_shards": len(shards), "shards_for_the_split": {split}})
         self.reset()
         
     def reset(self):
@@ -360,8 +374,10 @@ else:
     if torch.cuda.is_available(): device = "cuda"
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = "mps"
-    print(f"using device: {device}, in the DDP stage if available")
+    print(f"using device: {device}")
+    wandb.log({"device": device})
 
+#pytorch issue to lookup for with autocast device changed to device_type
 device_type = "cuda" if device.startswith("cuda") else "cpu"
 #----------------------------------------------
 torch.manual_seed(1337)
@@ -378,6 +394,10 @@ grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
 if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+    wandb.log({
+        "total_desired_batch_size": total_batch_size,
+        "calculated_grad_accum_steps": grad_accum_steps
+    })
 
 # print("I am GPU/CPU:", ddp_rank)
 # print("test success!")
@@ -393,9 +413,19 @@ torch.set_float32_matmul_precision("high")
 #with out using pretrained weights
 
 #create model
-model = GPT(GPTConfig(vocab_size=50304)) #vocab_size use better 8,16,32 divisble number
+config = GPTConfig(vocab_size=50304) #vocab_size use better 8,16,32 divisble number
+model = GPT(config)
 model.to(device)
-use_compile = False # torch.compile interfaces with hellaSwag eval and generation.
+
+#-----wandb logging-------
+wandb.init(
+        project="fineweb-llm",
+        name=f"run_{int(time.time())}",  # unique run name
+        config=asdict(config)            # logs block_size, vocab_size, n_layer, etc.
+    )
+#----------
+
+use_compile = True # torch.compile interfaces with hellaSwag eval and generation.
 if use_compile:
     model= torch.compile(model)
 if ddp:
@@ -407,6 +437,19 @@ max_lr = 6e-4
 min_lr = max_lr*0.1
 warm_up_steps = 715
 max_steps = 19073
+
+# Add additional training hyperparameters not in GPTConfig
+wandb.config.update({
+    "device": device,
+    "B": B,
+    "T": T,
+    "max_lr": max_lr,
+    "min_lr": min_lr,
+    "warm_up_steps": warm_up_steps,
+    "max_steps": max_steps,
+    "use_compile": use_compile,
+})
+
 
 def get_lr(it):
     #1. linear warmup for warmup_iters steps
@@ -422,7 +465,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 #optimizer
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
 
 #create the log directory we will write checkpoints to log to
 log_dir = "log"
@@ -445,7 +488,7 @@ for step in range(max_steps):#iterations
             for _ in range(val_loss_steps):
                 x,y = val_dataloader.next_batch()
                 x,y = x.to(device),y.to(device)
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(x,y)
                 loss = loss / val_loss_steps
                 val_loss_accum +=loss.detach()
@@ -453,21 +496,34 @@ for step in range(max_steps):#iterations
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
+            wandb.log({"val_loss": val_loss_accum.item()})
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+                wandb.log({
+                "step": step,
+                "val": val_loss_accum.item()
+                })
             if step > 0 and (step % 5000 == 0 or last_step):
                 #optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
                     'model': raw_model.state_dict(),
+                    'optimizer': optimizer.state_dict(), #add optimizer state for later resuming training
                     'config': raw_model.config,
                     'step': step,
-                    'val_loss': val_loss_accum.item()
+                    'val_loss': val_loss_accum.item(),
+                    'rng_state': torch.get_rng_state(), #get random seed from pytorch for resuming training where it left off
+                    'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
                 }
                 #you might also want to add optimizer.state() and
                 #rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
-    
+
+                # log checkpoint to W&B
+                artifact = wandb.Artifact(f"model_step_{step:05d}", type="model")
+                artifact.add_file(checkpoint_path)
+                wandb.log_artifact(artifact)
+                
     #once in a while evalute hellaSwag
     if (step %250 ==0 or last_step) and (not use_compile):
         num_correct_norm = 0
@@ -482,7 +538,7 @@ for step in range(max_steps):#iterations
             mask = mask.to(device)
             #get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(tokens)
                 pred_norm = get_most_likely_row(tokens, mask, logits)
             num_total +=1
@@ -498,8 +554,13 @@ for step in range(max_steps):#iterations
         acc_norm = num_correct_norm / num_total
         if master_process:
             print(f"HellaSwag accuracy: {num_correct_norm}/ {num_total}= {acc_norm:.4f}")
+            wandb.log({"hellaswag_acc": acc_norm})
             with open(log_file, "a")as f:
                 f.write(f"{step} hella {acc_norm:.4f}\n")
+            wandb.log({
+            "step": step,
+            "hella": acc_norm
+            })
     
     #once in a while generate from the model (except step 0, which is noise)
     #disabled because torch.compile throws a scary error to be solved as Andrej Kharpathy
@@ -518,7 +579,7 @@ for step in range(max_steps):#iterations
         while xgen.size(1) < max_length:
             #forward the model to get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(xgen) #(B, T, vocab_size)
                 #take the logits at the last position
                 logits = logits[:,-1, :] #(B, vocab_size)
@@ -540,6 +601,41 @@ for step in range(max_steps):#iterations
                 tokens = xgen[i, :max_length].tolist()
                 decoded = enc.decode(tokens)
                 print(f"rank {ddp_rank} sample {i}: {decoded}")
+                wandb.log({f"sample_{i}_step_{step}": decoded})
+
+    # ===== LOAD LATEST CHECKPOINT IF AVAILABLE =====
+    checkpoint_files = glob.glob(os.path.join(log_dir, "model_*.pt"))
+
+    if checkpoint_files:
+        # Sort by step number extracted from filename: model_00005.pt → 5
+        checkpoint_files = sorted(
+            checkpoint_files,
+            key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0])
+        )
+        latest_ckpt = checkpoint_files[-1]  # highest step checkpoint
+
+        # Load checkpoint
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        raw_model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        
+        # Restore RNG states for reproducibility
+        torch.set_rng_state(checkpoint['rng_state'])
+        if torch.cuda.is_available() and checkpoint.get('cuda_rng_state') is not None:
+            torch.cuda.set_rng_state_all(checkpoint['cuda_rng_state'])
+        
+        start_step = checkpoint['step'] + 1
+        print(f"Resuming training from checkpoint {latest_ckpt} at step {start_step}")
+        wandb.log({"Resuming_training_from_checkpoint": {latest_ckpt}, "step": {start_step}})
+    else:
+        # No checkpoint found → start from scratch
+        start_step = 0
+        torch.manual_seed(1337)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(1337)
+        print("No checkpoint found. Starting training from scratch.")
+        wandb.log({"check_stats":"No checkpoint found. Starting training from scratch."})
+    # ------------------------------------
 
     #training loop
     #do one step of optimization
@@ -549,9 +645,11 @@ for step in range(max_steps):#iterations
     for micro_step_batch in range(grad_accum_steps):
         x,y = train_dataloader.next_batch()
         x,y = x.to(device), y.to(device) #move the batches from cpu to device
+        if ddp:
+            model.require_backward_grad_sync = (micro_step_batch == grad_accum_steps -1)
         #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
         #the logits activations changes to bf16 but the model weight parameters stay at ft32
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             logits, loss = model(x,y)
             #import code;code.interact(local=locals()) #inline python shell, manual debugger
         #we have to scale the loss down to account for gradient accumulation,
@@ -560,8 +658,6 @@ for step in range(max_steps):#iterations
         #instead of a SUM we want MEAN. Scale the loss here so it comes out right
         loss = loss/grad_accum_steps #scale down to cover the sum over the gradient accum stage
         loss_accum += loss.detach()
-        if ddp:
-            model.require_backward_grad_sync = (micro_step_batch == grad_accum_steps -1)
         loss.backward()
     if ddp: 
         dist.all_reduce(loss_accum, op = dist.ReduceOp.AVG)
@@ -571,15 +667,29 @@ for step in range(max_steps):#iterations
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
-    torch.cuda.synchronize()
+    if device_type=="cuda":
+        torch.cuda.synchronize()
     t1=time.time()
     dt= (t1-t0) #in diff in seconds
     tokens_processed = train_dataloader.B * train_dataloader.T * grad_accum_steps * ddp_world_size
     tokens_per_sec = tokens_processed/ dt
     if master_process:
         print(f"step {step:4d}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, dt: {dt*1000:.2f}ms, token/sec throughput: {tokens_per_sec:.2f}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
+        wandb.log({
+        "train_loss": loss_accum.item(),
+        "learning_rate": lr,
+        "grad_norm": norm,
+        "tokens_per_sec": tokens_per_sec,
+        "step": step
+    })
         with open(log_file, "a") as f:
             f.write(f"{step} train {loss_accum.item():.6f}\n")
+        
+        # Log to W&B as usual
+        wandb.log({
+            "step": step,
+            "train_loss": loss_accum.item()
+        })
     #call garbage collector
     cleanup_memory(x,y,loss)
 
