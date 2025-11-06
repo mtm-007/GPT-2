@@ -419,7 +419,7 @@ model.to(device)
 
 #-----wandb logging-------
 wandb.init(
-        project="fineweb-llm",
+        project='nano-gpt-tracking-test',
         name=f"run_{int(time.time())}",  # unique run name
         config=asdict(config)            # logs block_size, vocab_size, n_layer, etc.
     )
@@ -432,6 +432,11 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model #always contain the raw unwrapped model
 
+wandb.watch(raw_model)
+
+num_of_parameters = sum(p.numel() for p in raw_model.parameters())/1e6
+print(f"{num_of_parameters:.2f} M parameters")
+wandb.log({"num_of_parameters": num_of_parameters})
 #learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr*0.1
