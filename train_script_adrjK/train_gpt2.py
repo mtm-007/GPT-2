@@ -14,6 +14,13 @@ import torch.nn as nn
 from torch.nn import functional as F
 from hellaswag_evals import render_example, iterate_examples
 
+#-----wandb logging-------
+wandb.init(
+        project='nano-gpt-tracking-test',
+        name=f"run_{int(time.time())}",  # unique run name
+)
+#----------
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("device used: ", device)
 wandb.log({"device": device})
@@ -107,7 +114,7 @@ class GPTConfig:
     def __init__(self, vocab_size, n_embd, n_layer, n_head, block_size) and manually pass the parameters
     """
     block_size: int = 1024
-    vocab_size: int = 502304
+    vocab_size: int = 50304
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
@@ -252,7 +259,7 @@ class GPT(nn.Module):
 #dataloader
 def load_tokens(filename):
     npt = np.load(filename)
-    npt = npt.astpe(np.int32) # per kharpathy Readme PR update
+    npt = npt.astype(np.int32) # per kharpathy Readme PR update pytorch dont accept uint16 arrays directly.
     ptt = torch.tensor(npt, dtype=torch.long)
     return ptt
 
@@ -266,7 +273,7 @@ class Dataloaderlite:
         assert split in {"train", "val"}
 
         #get the shard filename
-        data_root = "edu_fineweb10B"
+        data_root = "edu_fineweb1B"
         shards = os.listdir(data_root)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
@@ -275,7 +282,7 @@ class Dataloaderlite:
         assert len(shards) > 0, f"no shards found for split {split}"
         if master_process:
             print(f"found {len(shards)} shards for the split {split}")
-            wandb.log({"num_shards": len(shards), "shards_for_the_split": {split}})
+            wandb.log({"num_shards": len(shards), "shards_for_the_split": split})
         self.reset()
         
     def reset(self):
@@ -387,7 +394,7 @@ if torch.cuda.is_available():
 enc = tiktoken.get_encoding("gpt2")
 
 total_batch_size = 32768 #524288 #2**19 #~0.5M tokens
-B = 8
+B = 4
 T = 1024
 assert total_batch_size % (B *T * ddp_world_size) ==0, "make sure its divisible by B*T"
 grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
@@ -406,26 +413,19 @@ if master_process:
 train_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
 val_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
 
-
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
 #model = GPT.from_pretrained('gpt2')
 #with out using pretrained weights
 
 #create model
-config = GPTConfig(vocab_size=50304) #vocab_size use better 8,16,32 divisble number
+config = GPTConfig() #vocab_size use better 8,16,32 divisble number
 model = GPT(config)
 model.to(device)
 
-#-----wandb logging-------
-wandb.init(
-        project='nano-gpt-tracking-test',
-        name=f"run_{int(time.time())}",  # unique run name
-        config=asdict(config)            # logs block_size, vocab_size, n_layer, etc.
-    )
-#----------
+wandb.config.update(asdict(config)) # logs block_size, vocab_size, n_layer, etc.
 
-use_compile = True # torch.compile interfaces with hellaSwag eval and generation.
+use_compile = False # torch.compile interfaces with hellaSwag eval and generation.
 if use_compile:
     model= torch.compile(model)
 if ddp:
@@ -441,7 +441,7 @@ wandb.log({"num_of_parameters": num_of_parameters})
 max_lr = 6e-4
 min_lr = max_lr*0.1
 warm_up_steps = 715
-max_steps = 19073
+max_steps = 50
 
 # Add additional training hyperparameters not in GPTConfig
 wandb.config.update({
@@ -602,11 +602,13 @@ for step in range(max_steps):#iterations
                 xgen = torch.cat((xgen, xcol), dim=1)
             
             # print the generated text
+            table = wandb.Table(columns=["step", "rank", "sample_index", "text"])
             for i in range(num_return_sequence):
                 tokens = xgen[i, :max_length].tolist()
                 decoded = enc.decode(tokens)
                 print(f"rank {ddp_rank} sample {i}: {decoded}")
-                wandb.log({f"sample_{i}_step_{step}": decoded})
+                table.add_data(step, ddp_rank, i, decoded)
+            wandb.log({"generated_samples": table})
 
     # ===== LOAD LATEST CHECKPOINT IF AVAILABLE =====
     checkpoint_files = glob.glob(os.path.join(log_dir, "model_*.pt"))
@@ -631,7 +633,7 @@ for step in range(max_steps):#iterations
         
         start_step = checkpoint['step'] + 1
         print(f"Resuming training from checkpoint {latest_ckpt} at step {start_step}")
-        wandb.log({"Resuming_training_from_checkpoint": {latest_ckpt}, "step": {start_step}})
+        wandb.log({"Resuming_training_from_checkpoint": latest_ckpt, "step": start_step})
     else:
         # No checkpoint found → start from scratch
         start_step = 0
@@ -697,6 +699,12 @@ for step in range(max_steps):#iterations
         })
     #call garbage collector
     cleanup_memory(x,y,loss)
+
+# training loop ends and add log_file to wandb
+if master_process:
+    artifact = wandb.Artifact("final_training_logs", type="log")
+    artifact.add_file(log_file)
+    wandb.log_artifact(artifact)
 
 if ddp:
     destroy_process_group()

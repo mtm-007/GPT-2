@@ -64,8 +64,8 @@ enc = tiktoken.get_encoding("gpt2")
 def download(split):
     """ Downloads HellaSwag DATA_CACHE_DIR"""
     os.makedirs(DATA_CACHE_DIR, exist_ok=True)
-    data_url = hellaswags[split]
-    data_filename = os.path.join(DATA_CACHE_DIR, f"hellaswag_{split},jsonl")
+    data_url = hellaSwags[split]
+    data_filename = os.path.join(DATA_CACHE_DIR, f"hellaswag_{split}.jsonl")
     if not os.path.exists(data_filename):
         print(f"Downloading {data_url} to {data_filename}...")
         download_file(data_url, data_filename)
@@ -112,7 +112,7 @@ def render_example(example):
 def iterate_examples(split):
     #there are 10,042 examples in total in val
     download(split)
-    with open(os.path.join(DATA_CACHE_DIR, f"hellasawg_{split}.jsonl"), "r") as f:
+    with open(os.path.join(DATA_CACHE_DIR, f"hellaswag_{split}.jsonl"), "r") as f:
         for line in f:
             example = json.loads(line)
             yield example
