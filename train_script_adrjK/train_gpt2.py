@@ -394,8 +394,8 @@ if torch.cuda.is_available():
 
 enc = tiktoken.get_encoding("gpt2")
 
-total_batch_size = 32768 #524288 #2**19 #~0.5M tokens
-B = 16
+total_batch_size =32768 #524288 #32768 #2**19 #~0.5M tokens
+B = 8
 T = 1024
 assert total_batch_size % (B *T * ddp_world_size) ==0, "make sure its divisible by B*T"
 grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
@@ -441,8 +441,8 @@ wandb.log({"num_of_parameters": num_of_parameters})
 #learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr*0.1
-warm_up_steps = 715
-max_steps = 10
+warm_up_steps = 60
+max_steps = 2000
 
 # Add additional training hyperparameters not in GPTConfig
 wandb.config.update({
@@ -494,7 +494,7 @@ for step in range(max_steps):#iterations
             for _ in range(val_loss_steps):
                 x,y = val_dataloader.next_batch()
                 x,y = x.to(device),y.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.float16):
                     logits, loss = model(x,y)
                 loss = loss / val_loss_steps
                 val_loss_accum +=loss.detach()
@@ -518,17 +518,16 @@ for step in range(max_steps):#iterations
                     'config': raw_model.config,
                     'step': step,
                     'val_loss': val_loss_accum.item(),
-                    'rng_state': torch.get_rng_state(), #get random seed from pytorch for resuming training where it left off
-                    'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                    # 'rng_state': torch.get_rng_state(), #get random seed from pytorch for resuming training where it left off
+                    # 'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                    # Just save the seed, not the full RNG state
+                    'seed': 1337
                 }
                 #you might also want to add optimizer.state() and
                 #rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
+                wandb.save(checkpoint_path)
 
-                # log checkpoint to W&B
-                artifact = wandb.Artifact(f"model_step_{step:05d}", type="model")
-                artifact.add_file(checkpoint_path)
-                wandb.log_artifact(artifact)
                 
     #once in a while evalute hellaSwag
     if (step %250 ==0 or last_step) and (not use_compile):
@@ -544,7 +543,7 @@ for step in range(max_steps):#iterations
             mask = mask.to(device)
             #get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.float16):
                     logits, loss = model(tokens)
                 pred_norm = get_most_likely_row(tokens, mask, logits)
             num_total +=1
@@ -571,10 +570,13 @@ for step in range(max_steps):#iterations
     #once in a while generate from the model (except step 0, which is noise)
     #disabled because torch.compile throws a scary error to be solved as Andrej Kharpathy
     #if you disable torch.compile, this code works fine
+
+    
     if ((step >0 and step %250 ==0) or last_step) and (not use_compile):
         model.eval()
         num_return_sequence = 4
         max_length = 32
+
         tokens = enc.encode("Hello, I'm a Andrej Kharpathy is my king language model,")
         tokens = torch.tensor(tokens, dtype=torch.long) #(16,)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequence,1) # (5, 16)
@@ -582,10 +584,11 @@ for step in range(max_steps):#iterations
         #create a seperate object generator for the random number to be outside the training loop and not intefer with the global training seed
         sample_rng = torch.Generator(device=device)
         sample_rng.manual_seed(42 + ddp_rank) #every rank is a different random seed
+        
         while xgen.size(1) < max_length:
             #forward the model to get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.float16):
                     logits, loss = model(xgen) #(B, T, vocab_size)
                 #take the logits at the last position
                 logits = logits[:,-1, :] #(B, vocab_size)
@@ -602,14 +605,14 @@ for step in range(max_steps):#iterations
                 #append to the sequence 
                 xgen = torch.cat((xgen, xcol), dim=1)
             
-            # print the generated text
-            table = wandb.Table(columns=["step", "rank", "sample_index", "text"])
-            for i in range(num_return_sequence):
-                tokens = xgen[i, :max_length].tolist()
-                decoded = enc.decode(tokens)
-                print(f"rank {ddp_rank} sample {i}: {decoded}")
-                table.add_data(step, ddp_rank, i, decoded)
-            wandb.log({"generated_samples": table})
+        # print the generated text
+        table = wandb.Table(columns=["step", "rank", "sample_index", "text"])
+        for i in range(num_return_sequence):
+            tokens = xgen[i, :max_length].tolist()
+            decoded = enc.decode(tokens)
+            print(f"rank {ddp_rank} sample {i}: {decoded}")
+            table.add_data(step, ddp_rank, i, decoded)
+        wandb.log({"generated_samples": table})
 
     # ===== LOAD LATEST CHECKPOINT IF AVAILABLE =====
     checkpoint_files = glob.glob(os.path.join(log_dir, "model_*.pt"))
@@ -627,79 +630,23 @@ for step in range(max_steps):#iterations
         raw_model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
 
-        # ---- Restore CPU RNG ----
-        rng_state = checkpoint['rng_state']
-
-        # Handle CPU RNG state
-        if isinstance(rng_state, torch.Tensor):
-            rng_state = rng_state.cpu()
-            if rng_state.dtype != torch.uint8:
-                rng_state = rng_state.to(torch.uint8)
-        else:
-            # If it's raw bytes/list, create tensor
-            rng_state = torch.ByteTensor(list(rng_state))
-
-        torch.set_rng_state(rng_state)
-
-        # ---- Restore CUDA RNG ----
-        cuda_rng_state = checkpoint.get('cuda_rng_state')
-        if torch.cuda.is_available() and cuda_rng_state is not None:
-            # Ensure it's a tensor with correct dtype and device
-            if not isinstance(cuda_rng_state, torch.Tensor):
-                # Convert from bytes/list to CPU tensor first
-                cuda_rng_state = torch.ByteTensor(list(cuda_rng_state))
-            
-            # Move to CUDA with uint8 dtype (works whether it's already a tensor or not)
-            cuda_rng_state = cuda_rng_state.to(device='cuda', dtype=torch.uint8)
-            torch.cuda.set_rng_state_all([cuda_rng_state])
-
-
-        # # Load checkpoint
-        # checkpoint = torch.load(latest_ckpt, map_location=device)
-        # raw_model.load_state_dict(checkpoint['model'])
-        # optimizer.load_state_dict(checkpoint['optimizer'])
-
-        # # ---- Restore CPU RNG ----
-        # rng_state = checkpoint['rng_state']
-
-        # # Handle CPU RNG state
-        # if isinstance(rng_state, torch.Tensor):
-        #     rng_state = rng_state.cpu()
-        #     if rng_state.dtype != torch.uint8:
-        #         rng_state = rng_state.to(torch.uint8)
-        # else:
-        #     # If it's raw bytes/list, create tensor
-        #     rng_state = torch.tensor(rng_state, dtype=torch.uint8, device='cpu')
-
-        # torch.set_rng_state(rng_state)
-
-        # # ---- Restore CUDA RNG ----
-        # cuda_rng_state = checkpoint.get('cuda_rng_state')
-        # if torch.cuda.is_available() and cuda_rng_state is not None:
-        #     # Handle CUDA RNG state
-        #     if isinstance(cuda_rng_state, torch.Tensor):
-        #         # Already a tensor - just move it to CUDA and ensure uint8
-        #         cuda_rng_state = cuda_rng_state.to(device='cuda', dtype=torch.uint8)
-        #     elif isinstance(cuda_rng_state, (list, tuple)):
-        #         # It's a list/tuple - convert to tensor
-        #         cuda_rng_state = torch.tensor(cuda_rng_state, dtype=torch.uint8, device='cuda')
-        #     else:
-        #         # It's bytes or similar - convert to list first, then to tensor
-        #         cuda_rng_state = torch.tensor(list(cuda_rng_state), dtype=torch.uint8, device='cuda')
-            
-        #     torch.cuda.set_rng_state_all([cuda_rng_state])
+        # Simply reset the seed
+        seed = checkpoint.get('seed', 1337)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
         start_step = checkpoint['step'] + 1
         print(f"Resuming training from checkpoint {latest_ckpt} at step {start_step}")
         wandb.log({"Resuming_training_from_checkpoint": latest_ckpt, "step": start_step})
-    else:
-        # No checkpoint found → start from scratch
-        start_step = 0
-        torch.manual_seed(1337)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(1337)
-        print("No checkpoint found. Starting training from scratch.")
-        wandb.log({"check_stats":"No checkpoint found. Starting training from scratch."})
+    # else:
+    #     # No checkpoint found → start from scratch
+    #     start_step = 0
+    #     torch.manual_seed(1337)
+    #     if torch.cuda.is_available():
+    #         torch.cuda.manual_seed(1337)
+    #     print("No checkpoint found. Starting training from scratch.")
+    #     wandb.log({"check_stats":"No checkpoint found. Starting training from scratch."})
     # ------------------------------------
 
     #training loop
@@ -714,7 +661,7 @@ for step in range(max_steps):#iterations
             model.require_backward_grad_sync = (micro_step_batch == grad_accum_steps -1)
         #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
         #the logits activations changes to bf16 but the model weight parameters stay at ft32
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device_type, dtype=torch.float16):
             logits, loss = model(x,y)
             #import code;code.interact(local=locals()) #inline python shell, manual debugger
         #we have to scale the loss down to account for gradient accumulation,
@@ -760,9 +707,7 @@ for step in range(max_steps):#iterations
 
 # training loop ends and add log_file to wandb
 if master_process:
-    artifact = wandb.Artifact("final_training_logs", type="log")
-    artifact.add_file(log_file)
-    wandb.log_artifact(artifact)
+    wandb.save(log_file)
 
 if ddp:
     destroy_process_group()
