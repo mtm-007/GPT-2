@@ -441,8 +441,8 @@ wandb.log({"num_of_parameters": num_of_parameters})
 #learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr*0.1
-warm_up_steps = 60
-max_steps = 2000
+warm_up_steps = 6
+max_steps = 20
 
 # Add additional training hyperparameters not in GPTConfig
 wandb.config.update({
@@ -509,7 +509,7 @@ for step in range(max_steps):#iterations
                 "step": step,
                 "val": val_loss_accum.item()
                 })
-            if step > 0 and (step % 5000 == 0 or last_step):
+            if step > 0 and (step % 1000 == 0 or last_step):
                 #optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
