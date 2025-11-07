@@ -6,6 +6,7 @@ import tiktoken
 import inspect
 import gc
 import wandb
+import glob
 import numpy as np
 from dataclasses import dataclass
 from dataclasses import asdict
@@ -394,7 +395,7 @@ if torch.cuda.is_available():
 enc = tiktoken.get_encoding("gpt2")
 
 total_batch_size = 32768 #524288 #2**19 #~0.5M tokens
-B = 4
+B = 16
 T = 1024
 assert total_batch_size % (B *T * ddp_world_size) ==0, "make sure its divisible by B*T"
 grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
@@ -441,7 +442,7 @@ wandb.log({"num_of_parameters": num_of_parameters})
 max_lr = 6e-4
 min_lr = max_lr*0.1
 warm_up_steps = 715
-max_steps = 50
+max_steps = 10
 
 # Add additional training hyperparameters not in GPTConfig
 wandb.config.update({
@@ -625,12 +626,69 @@ for step in range(max_steps):#iterations
         checkpoint = torch.load(latest_ckpt, map_location=device)
         raw_model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
-        
-        # Restore RNG states for reproducibility
-        torch.set_rng_state(checkpoint['rng_state'])
-        if torch.cuda.is_available() and checkpoint.get('cuda_rng_state') is not None:
-            torch.cuda.set_rng_state_all(checkpoint['cuda_rng_state'])
-        
+
+        # ---- Restore CPU RNG ----
+        rng_state = checkpoint['rng_state']
+
+        # Handle CPU RNG state
+        if isinstance(rng_state, torch.Tensor):
+            rng_state = rng_state.cpu()
+            if rng_state.dtype != torch.uint8:
+                rng_state = rng_state.to(torch.uint8)
+        else:
+            # If it's raw bytes/list, create tensor
+            rng_state = torch.ByteTensor(list(rng_state))
+
+        torch.set_rng_state(rng_state)
+
+        # ---- Restore CUDA RNG ----
+        cuda_rng_state = checkpoint.get('cuda_rng_state')
+        if torch.cuda.is_available() and cuda_rng_state is not None:
+            # Ensure it's a tensor with correct dtype and device
+            if not isinstance(cuda_rng_state, torch.Tensor):
+                # Convert from bytes/list to CPU tensor first
+                cuda_rng_state = torch.ByteTensor(list(cuda_rng_state))
+            
+            # Move to CUDA with uint8 dtype (works whether it's already a tensor or not)
+            cuda_rng_state = cuda_rng_state.to(device='cuda', dtype=torch.uint8)
+            torch.cuda.set_rng_state_all([cuda_rng_state])
+
+
+        # # Load checkpoint
+        # checkpoint = torch.load(latest_ckpt, map_location=device)
+        # raw_model.load_state_dict(checkpoint['model'])
+        # optimizer.load_state_dict(checkpoint['optimizer'])
+
+        # # ---- Restore CPU RNG ----
+        # rng_state = checkpoint['rng_state']
+
+        # # Handle CPU RNG state
+        # if isinstance(rng_state, torch.Tensor):
+        #     rng_state = rng_state.cpu()
+        #     if rng_state.dtype != torch.uint8:
+        #         rng_state = rng_state.to(torch.uint8)
+        # else:
+        #     # If it's raw bytes/list, create tensor
+        #     rng_state = torch.tensor(rng_state, dtype=torch.uint8, device='cpu')
+
+        # torch.set_rng_state(rng_state)
+
+        # # ---- Restore CUDA RNG ----
+        # cuda_rng_state = checkpoint.get('cuda_rng_state')
+        # if torch.cuda.is_available() and cuda_rng_state is not None:
+        #     # Handle CUDA RNG state
+        #     if isinstance(cuda_rng_state, torch.Tensor):
+        #         # Already a tensor - just move it to CUDA and ensure uint8
+        #         cuda_rng_state = cuda_rng_state.to(device='cuda', dtype=torch.uint8)
+        #     elif isinstance(cuda_rng_state, (list, tuple)):
+        #         # It's a list/tuple - convert to tensor
+        #         cuda_rng_state = torch.tensor(cuda_rng_state, dtype=torch.uint8, device='cuda')
+        #     else:
+        #         # It's bytes or similar - convert to list first, then to tensor
+        #         cuda_rng_state = torch.tensor(list(cuda_rng_state), dtype=torch.uint8, device='cuda')
+            
+        #     torch.cuda.set_rng_state_all([cuda_rng_state])
+
         start_step = checkpoint['step'] + 1
         print(f"Resuming training from checkpoint {latest_ckpt} at step {start_step}")
         wandb.log({"Resuming_training_from_checkpoint": latest_ckpt, "step": start_step})
