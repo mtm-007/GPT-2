@@ -1,4 +1,3 @@
-
 import math
 import sys,os
 import time
@@ -8,6 +7,7 @@ import gc
 import wandb
 import glob
 import numpy as np
+import threading, queue
 from dataclasses import dataclass
 from dataclasses import asdict
 import torch
@@ -274,7 +274,7 @@ class Dataloaderlite:
         assert split in {"train", "val"}
 
         #get the shard filename
-        data_root = "edu_fineweb1B"
+        data_root = "edu_fineweb10B"
         shards = os.listdir(data_root)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
@@ -304,6 +304,60 @@ class Dataloaderlite:
             self.current_shard = (self.current_shard +1) %len(self.shards)
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank
+        return x, y
+
+class DataloaderliteGPU:
+    """Dataloader that preloads multiple shards into GPU memory"""
+    def __init__(self, B, T, process_rank, num_processes, split, device, preload_shards=10):
+        self.B = B
+        self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        self.device = device
+        self.preload_shards = preload_shards
+        assert split in {"train", "val"}
+
+        # Find shard files
+        data_root = "edu_fineweb10B"
+        shards = sorted([os.path.join(data_root, s) for s in os.listdir(data_root) if split in s])
+        self.shards = shards
+        assert len(shards) > 0, f"No shards found for split {split}"
+        if master_process:
+            print(f"Found {len(shards)} shards for split {split}")
+            wandb.log({"num_shards": len(shards), "split": split})
+
+        self.current_shard_idx = 0
+        self._load_preloaded_shards()
+        self.current_position = self.B * self.T * self.process_rank
+
+    def _load_preloaded_shards(self):
+        # Load N shards into GPU memory
+        end_idx = min(self.current_shard_idx + self.preload_shards, len(self.shards))
+        self.gpu_tokens = []
+        for idx in range(self.current_shard_idx, end_idx):
+            tokens = load_tokens(self.shards[idx]).to(self.device)
+            self.gpu_tokens.append(tokens)
+        self.gpu_tokens = torch.cat(self.gpu_tokens)
+        self.current_shard_idx = end_idx % len(self.shards)
+
+    def reset(self):
+        """Reset the dataloader to the first shard."""
+        self.current_shard_idx = 0
+        self._load_preloaded_shards()
+        self.current_position = self.B * self.T * self.process_rank
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.gpu_tokens[self.current_position: self.current_position + B*T + 1]
+        x = buf[:-1].view(B, T)
+        y = buf[1:].view(B, T)
+        self.current_position += B*T*self.num_processes
+
+        # If we reach the end of the preloaded shards, reload next batch of shards
+        if self.current_position + (B*T*self.num_processes + 1) > len(self.gpu_tokens):
+            self._load_preloaded_shards()
+            self.current_position = self.B * self.T * self.process_rank
+
         return x, y
 
 def cleanup_memory(*tensors):
@@ -394,8 +448,8 @@ if torch.cuda.is_available():
 
 enc = tiktoken.get_encoding("gpt2")
 
-total_batch_size =32768 #524288 #32768 #2**19 #~0.5M tokens
-B = 8
+total_batch_size =524288 #32768 #2**19 #~0.5M tokens
+B = 32
 T = 1024
 assert total_batch_size % (B *T * ddp_world_size) ==0, "make sure its divisible by B*T"
 grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
@@ -411,8 +465,17 @@ if master_process:
 # print("test success!")
 # import sys; sys.exit(0)
 
-train_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
-val_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+# train_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
+# val_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+
+# Create GPU dataloaders
+train_dataloader = DataloaderliteGPU( B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device, preload_shards=48  # adjust number of shards to fit your GPU memory
+)
+
+val_dataloader = DataloaderliteGPU(
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val", device=device, preload_shards=16   # usually fewer shards for validation
+)
+
 
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
@@ -426,9 +489,10 @@ model.to(device)
 
 wandb.config.update(asdict(config)) # logs block_size, vocab_size, n_layer, etc.
 
-use_compile = False # torch.compile interfaces with hellaSwag eval and generation.
+use_compile = True # torch.compile interfaces with hellaSwag eval and generation.
 if use_compile:
     model= torch.compile(model)
+    print("torch compile used: True")
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model #always contain the raw unwrapped model
@@ -441,8 +505,8 @@ wandb.log({"num_of_parameters": num_of_parameters})
 #learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr*0.1
-warm_up_steps = 6
-max_steps = 20
+warm_up_steps = 715
+max_steps = 19073
 
 # Add additional training hyperparameters not in GPTConfig
 wandb.config.update({
@@ -494,7 +558,7 @@ for step in range(max_steps):#iterations
             for _ in range(val_loss_steps):
                 x,y = val_dataloader.next_batch()
                 x,y = x.to(device),y.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.float16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(x,y)
                 loss = loss / val_loss_steps
                 val_loss_accum +=loss.detach()
@@ -543,7 +607,7 @@ for step in range(max_steps):#iterations
             mask = mask.to(device)
             #get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.float16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(tokens)
                 pred_norm = get_most_likely_row(tokens, mask, logits)
             num_total +=1
@@ -588,7 +652,7 @@ for step in range(max_steps):#iterations
         while xgen.size(1) < max_length:
             #forward the model to get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.float16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(xgen) #(B, T, vocab_size)
                 #take the logits at the last position
                 logits = logits[:,-1, :] #(B, vocab_size)
@@ -661,7 +725,7 @@ for step in range(max_steps):#iterations
             model.require_backward_grad_sync = (micro_step_batch == grad_accum_steps -1)
         #use pytorch autocast(automatic mixed precision) for model and loss only leave others 
         #the logits activations changes to bf16 but the model weight parameters stay at ft32
-        with torch.autocast(device_type=device_type, dtype=torch.float16):
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             logits, loss = model(x,y)
             #import code;code.interact(local=locals()) #inline python shell, manual debugger
         #we have to scale the loss down to account for gradient accumulation,
