@@ -308,13 +308,24 @@ class Dataloaderlite:
 
 class DataloaderliteGPU:
     """Dataloader that preloads multiple shards into GPU memory"""
-    def __init__(self, B, T, process_rank, num_processes, split, device, preload_shards=10):
+    def __init__(self, B, T, process_rank, num_processes, split, device, preload_shards=10, max_memory_gb=None):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
         self.device = device
         self.preload_shards = preload_shards
+        
+        # Auto-calculate max shards based on available memory
+        if max_memory_gb is not None:
+            # More conservative estimate: each 100M token shard ≈ 750MB (empirically measured)
+            # This accounts for int32 (4 bytes) + PyTorch overhead (~87% efficiency)
+            gb_per_shard = 0.75  # 750MB per 100M token shard
+            max_shards = int(max_memory_gb / gb_per_shard)
+            self.preload_shards = min(preload_shards, max_shards)
+            if process_rank == 0:
+                print(f"Auto-adjusted preload_shards to {self.preload_shards} (est. {self.preload_shards * gb_per_shard:.1f}GB) based on {max_memory_gb}GB limit")
+        
         assert split in {"train", "val"}
 
         # Find shard files
@@ -322,23 +333,38 @@ class DataloaderliteGPU:
         shards = sorted([os.path.join(data_root, s) for s in os.listdir(data_root) if split in s])
         self.shards = shards
         assert len(shards) > 0, f"No shards found for split {split}"
-        if master_process:
+        if process_rank == 0:
             print(f"Found {len(shards)} shards for split {split}")
-            wandb.log({"num_shards": len(shards), "split": split})
 
         self.current_shard_idx = 0
         self._load_preloaded_shards()
         self.current_position = self.B * self.T * self.process_rank
 
     def _load_preloaded_shards(self):
+        # Free previous shards first to avoid memory spike
+        if hasattr(self, 'gpu_tokens'):
+            del self.gpu_tokens
+            torch.cuda.empty_cache()
+        
         # Load N shards into GPU memory
         end_idx = min(self.current_shard_idx + self.preload_shards, len(self.shards))
-        self.gpu_tokens = []
+        
+        # Load and concatenate more efficiently
+        gpu_tokens_list = []
         for idx in range(self.current_shard_idx, end_idx):
-            tokens = load_tokens(self.shards[idx]).to(self.device)
-            self.gpu_tokens.append(tokens)
-        self.gpu_tokens = torch.cat(self.gpu_tokens)
+            tokens = load_tokens(self.shards[idx])
+            # Move to GPU one at a time to avoid double memory usage
+            gpu_tokens_list.append(tokens.to(self.device, non_blocking=True))
+        
+        self.gpu_tokens = torch.cat(gpu_tokens_list)
+        del gpu_tokens_list  # Free the list
+        
         self.current_shard_idx = end_idx % len(self.shards)
+        
+        if self.process_rank == 0:
+            num_loaded = len(range(self.current_shard_idx if self.current_shard_idx < end_idx else 0, end_idx))
+            memory_gb = self.gpu_tokens.element_size() * self.gpu_tokens.numel() / 1024 / 1024 / 1024
+            print(f"Loaded {num_loaded} shards ({self.gpu_tokens.numel()/1e9:.1f}B tokens), GPU memory: {memory_gb:.2f} GB")
 
     def reset(self):
         """Reset the dataloader to the first shard."""
@@ -469,13 +495,29 @@ if master_process:
 # val_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
 
 # Create GPU dataloaders
-train_dataloader = DataloaderliteGPU( B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device, preload_shards=48  # adjust number of shards to fit your GPU memory
+# Let it automatically figure out how many shards to load
+# Conservative estimate: 35GB / 0.75 = ~46 shards
+train_dataloader = DataloaderliteGPU(
+    B=B,  # Increased batch size
+    T=T, 
+    process_rank=ddp_rank, 
+    num_processes=ddp_world_size, 
+    split="train", 
+    device=device, 
+    preload_shards=100,  # Ask for more, it will cap itself
+    max_memory_gb=40     # Be conservative - leave 16GB headroom
 )
 
 val_dataloader = DataloaderliteGPU(
-    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val", device=device, preload_shards=16   # usually fewer shards for validation
+    B=B,
+    T=T, 
+    process_rank=ddp_rank, 
+    num_processes=ddp_world_size, 
+    split="val", 
+    device=device, 
+    preload_shards=20,
+    max_memory_gb=16
 )
-
 
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
