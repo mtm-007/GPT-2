@@ -10,6 +10,8 @@ __pycache__/
 #large data
 /data
 
+log/*.pt
+*.pt
 
 #
 #wandb tracking data

@@ -274,7 +274,7 @@ class Dataloaderlite:
         assert split in {"train", "val"}
 
         #get the shard filename
-        data_root = "edu_fineweb10B"
+        data_root = "edu_fineweb1B"
         shards = os.listdir(data_root)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
@@ -329,7 +329,7 @@ class DataloaderliteGPU:
         assert split in {"train", "val"}
 
         # Find shard files
-        data_root = "edu_fineweb10B"
+        data_root = "edu_fineweb1B"
         shards = sorted([os.path.join(data_root, s) for s in os.listdir(data_root) if split in s])
         self.shards = shards
         assert len(shards) > 0, f"No shards found for split {split}"
@@ -474,7 +474,7 @@ if torch.cuda.is_available():
 
 enc = tiktoken.get_encoding("gpt2")
 
-total_batch_size =524288 #32768 #2**19 #~0.5M tokens
+total_batch_size =32768#524288 #32768 #2**19 #~0.5M tokens
 B = 32
 T = 1024
 assert total_batch_size % (B *T * ddp_world_size) ==0, "make sure its divisible by B*T"
@@ -491,33 +491,33 @@ if master_process:
 # print("test success!")
 # import sys; sys.exit(0)
 
-# train_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
-# val_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+train_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
+val_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
 
 # Create GPU dataloaders
 # Let it automatically figure out how many shards to load
 # Conservative estimate: 35GB / 0.75 = ~46 shards
-train_dataloader = DataloaderliteGPU(
-    B=B,  # Increased batch size
-    T=T, 
-    process_rank=ddp_rank, 
-    num_processes=ddp_world_size, 
-    split="train", 
-    device=device, 
-    preload_shards=100,  # Ask for more, it will cap itself
-    max_memory_gb=40     # Be conservative - leave 16GB headroom
-)
+# train_dataloader = DataloaderliteGPU(
+#     B=B,  # Increased batch size
+#     T=T, 
+#     process_rank=ddp_rank, 
+#     num_processes=ddp_world_size, 
+#     split="train", 
+#     device=device, 
+#     preload_shards=100,  # Ask for more, it will cap itself
+#     max_memory_gb=40     # Be conservative - leave 16GB headroom
+# )
 
-val_dataloader = DataloaderliteGPU(
-    B=B,
-    T=T, 
-    process_rank=ddp_rank, 
-    num_processes=ddp_world_size, 
-    split="val", 
-    device=device, 
-    preload_shards=20,
-    max_memory_gb=16
-)
+# val_dataloader = DataloaderliteGPU(
+#     B=B,
+#     T=T, 
+#     process_rank=ddp_rank, 
+#     num_processes=ddp_world_size, 
+#     split="val", 
+#     device=device, 
+#     preload_shards=20,
+#     max_memory_gb=16
+# )
 
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")
@@ -583,15 +583,55 @@ optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4,
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
-with open(log_file, "w") as f:#open for writing to clear the file
-    pass
+# with open(log_file, "w") as f:#open for writing to clear the file
+#     pass
 
-for step in range(max_steps):#iterations
+   # ===== LOAD LATEST CHECKPOINT IF AVAILABLE =====
+checkpoint_files = glob.glob(os.path.join(log_dir, "model_*.pt"))
+
+if checkpoint_files:
+    # Sort by step number extracted from filename: model_00005.pt → 5
+    checkpoint_files = sorted(
+        checkpoint_files,
+        key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0])
+    )
+    latest_ckpt = checkpoint_files[-1]  # highest step checkpoint
+
+    # Load checkpoint
+    checkpoint = torch.load(latest_ckpt, map_location=device, weights_only=False)
+    raw_model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+
+    # Simply reset the seed
+    seed = checkpoint.get('seed', 1337)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    start_step = checkpoint['step'] + 1
+    print(f"Resuming training from checkpoint {latest_ckpt} at step {start_step}")
+    wandb.log({"Resuming_training_from_checkpoint": latest_ckpt, "step": start_step})
+
+    # ADDED: Append separator when resuming
+    with open(log_file, "a") as f:
+        f.write(f"\n# === Resumed training from step {start_step} ===\n")
+else:
+    # No checkpoint found → start from scratch
+    start_step = 0
+    print("No checkpoint found. Starting training from scratch.")
+    wandb.log({"training_status": "Starting from scratch"})
+
+    with open(log_file, "w") as f:#open for writing to clear the file
+        pass
+
+
+for step in range(start_step, max_steps):
+#for step in range(max_steps):#iterations
     t0=time.time()
     last_step = (step == max_steps -1)
 
     #once in a while evaluator our evaluation loss
-    if step %2500 ==0 or last_step:
+    if step %500 ==0 or last_step:
         model.eval()
         val_dataloader.reset()
         with torch.no_grad():
@@ -636,7 +676,7 @@ for step in range(max_steps):#iterations
 
                 
     #once in a while evalute hellaSwag
-    if (step %250 ==0 or last_step) and (not use_compile):
+    if (step %500 ==0 or last_step):# and (not use_compile):
         num_correct_norm = 0
         num_total = 0
         for i,example in enumerate(iterate_examples("val")):
@@ -678,12 +718,12 @@ for step in range(max_steps):#iterations
     #if you disable torch.compile, this code works fine
 
     
-    if ((step >0 and step %250 ==0) or last_step) and (not use_compile):
+    if ((step >0 and step %500 ==0) or last_step):# and (not use_compile):
         model.eval()
         num_return_sequence = 4
         max_length = 32
 
-        tokens = enc.encode("Hello, I'm a Andrej Kharpathy is my king language model,")
+        tokens = enc.encode("Hello, I'm a language model,")
         tokens = torch.tensor(tokens, dtype=torch.long) #(16,)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequence,1) # (5, 16)
         xgen = tokens.to(device)
@@ -720,31 +760,32 @@ for step in range(max_steps):#iterations
             table.add_data(step, ddp_rank, i, decoded)
         wandb.log({"generated_samples": table})
 
-    # ===== LOAD LATEST CHECKPOINT IF AVAILABLE =====
-    checkpoint_files = glob.glob(os.path.join(log_dir, "model_*.pt"))
+    # # ===== LOAD LATEST CHECKPOINT IF AVAILABLE =====
+    # checkpoint_files = glob.glob(os.path.join(log_dir, "model_*.pt"))
 
-    if checkpoint_files:
-        # Sort by step number extracted from filename: model_00005.pt → 5
-        checkpoint_files = sorted(
-            checkpoint_files,
-            key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0])
-        )
-        latest_ckpt = checkpoint_files[-1]  # highest step checkpoint
+    # if checkpoint_files:
+    #     # Sort by step number extracted from filename: model_00005.pt → 5
+    #     checkpoint_files = sorted(
+    #         checkpoint_files,
+    #         key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0])
+    #     )
+    #     latest_ckpt = checkpoint_files[-1]  # highest step checkpoint
 
-        # Load checkpoint
-        checkpoint = torch.load(latest_ckpt, map_location=device)
-        raw_model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
+    #     # Load checkpoint
+    #     checkpoint = torch.load(latest_ckpt, map_location=device, weights_only=False)
+    #     raw_model.load_state_dict(checkpoint['model'])
+    #     optimizer.load_state_dict(checkpoint['optimizer'])
 
-        # Simply reset the seed
-        seed = checkpoint.get('seed', 1337)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+    #     # Simply reset the seed
+    #     seed = checkpoint.get('seed', 1337)
+    #     torch.manual_seed(seed)
+    #     if torch.cuda.is_available():
+    #         torch.cuda.manual_seed_all(seed)
 
-        start_step = checkpoint['step'] + 1
-        print(f"Resuming training from checkpoint {latest_ckpt} at step {start_step}")
-        wandb.log({"Resuming_training_from_checkpoint": latest_ckpt, "step": start_step})
+    #     start_step = checkpoint['step'] + 1
+    #     print(f"Resuming training from checkpoint {latest_ckpt} at step {start_step}")
+    #     wandb.log({"Resuming_training_from_checkpoint": latest_ckpt, "step": start_step})
+    
     # else:
     #     # No checkpoint found → start from scratch
     #     start_step = 0
