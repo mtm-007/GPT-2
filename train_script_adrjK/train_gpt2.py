@@ -15,9 +15,11 @@ import torch.nn as nn
 from torch.nn import functional as F
 from hellaswag_evals import render_example, iterate_examples
 
+
 #-----wandb logging-------
+os.environ['WANDB_MODE'] = 'offline'
 wandb.init(
-        project='nano-gpt-tracking-test',
+        project='Llm_training_andrej_ver',
         name=f"run_{int(time.time())}",  # unique run name
 )
 #----------
@@ -497,27 +499,10 @@ val_dataloader = Dataloaderlite(B=B,T=T, process_rank=ddp_rank, num_processes=dd
 # Create GPU dataloaders
 # Let it automatically figure out how many shards to load
 # Conservative estimate: 35GB / 0.75 = ~46 shards
-# train_dataloader = DataloaderliteGPU(
-#     B=B,  # Increased batch size
-#     T=T, 
-#     process_rank=ddp_rank, 
-#     num_processes=ddp_world_size, 
-#     split="train", 
-#     device=device, 
-#     preload_shards=100,  # Ask for more, it will cap itself
-#     max_memory_gb=40     # Be conservative - leave 16GB headroom
-# )
+# train_dataloader = DataloaderliteGPU( B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device, preload_shards=100,  # Ask for more, it will cap itself
+# max_memory_gb=40     # Be conservative - leave 16GB headroom )
 
-# val_dataloader = DataloaderliteGPU(
-#     B=B,
-#     T=T, 
-#     process_rank=ddp_rank, 
-#     num_processes=ddp_world_size, 
-#     split="val", 
-#     device=device, 
-#     preload_shards=20,
-#     max_memory_gb=16
-# )
+#val_dataloader = DataloaderliteGPU(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val", device=device, preload_shards=20, max_memory_gb=16)
 
 #set to tf32 when available, only available in GPU ampere feature
 torch.set_float32_matmul_precision("high")

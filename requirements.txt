@@ -4,8 +4,8 @@ tqdm
 numpy
 pylzma
 ipykernel
-#torch
+torch
 wandb
 transformers==4.30.2
-tiktoken
+tiktoken>=0.8.0
 
