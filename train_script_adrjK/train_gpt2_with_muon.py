@@ -17,7 +17,7 @@ from hellaswag_evals import render_example, iterate_examples
 
 
 #-----wandb logging-------
-#os.environ['WANDB_MODE'] = 'offline'
+os.environ['WANDB_MODE'] = 'offline'
 wandb.init(
         project='Llm_training_andrej_ver',
         name=f"run_{int(time.time())}",  # unique run name
@@ -27,6 +27,74 @@ wandb.init(
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("device used: ", device)
 wandb.log({"device": device})
+
+
+# -----------------------------------------------------------------------------
+# Muon optimizer
+
+def zeropower_via_svd(G, steps=None):
+    U, S, V = G.svd()
+    return U @ V.T
+
+@torch.compile
+def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
+    assert len(G.shape) == 2
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16()
+    X /= (X.norm() + eps)
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X
+
+zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
+
+class Muon(torch.optim.Optimizer):
+    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True,
+                 backend='newtonschulz5', backend_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps)
+        super().__init__(params, defaults)
+
+    def step(self):
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            zeropower_backend = zeropower_backends[group['backend']]
+            world_size = int(os.environ.get('WORLD_SIZE', 1))
+            rank = int(os.environ.get('RANK', 0))
+
+            total_params = sum(p.numel() for p in group['params'])
+            updates_flat = torch.zeros(total_params, device='cuda', dtype=torch.bfloat16)
+            curr_idx = 0
+            for i, p in enumerate(group['params']):
+                if i % world_size == rank:
+                    g = p.grad
+                    assert g is not None
+                    state = self.state[p]
+                    if 'momentum_buffer' not in state:
+                        state['momentum_buffer'] = torch.zeros_like(g)
+                    buf = state['momentum_buffer']
+                    buf.mul_(momentum).add_(g)
+                    g = g.add(buf, alpha=momentum) if group['nesterov'] else buf
+                    g = zeropower_backend(g, steps=group['backend_steps'])
+                    g *= max(1, g.size(0)/g.size(1))**0.5
+                    updates_flat[curr_idx:curr_idx+p.numel()] = g.flatten()
+                curr_idx += p.numel()
+
+            if world_size > 1:
+                dist.all_reduce(updates_flat, op=dist.ReduceOp.SUM)
+
+            curr_idx = 0
+            for p in group['params']:
+                g = updates_flat[curr_idx:curr_idx+p.numel()].view_as(p.data).type_as(p.data)
+                p.data.add_(g, alpha=-lr)
+                curr_idx += p.numel()
+
 
 class CasualSelfAttention(nn.Module):
 
@@ -441,31 +509,22 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 #set up DDP (distributed data parallel)
 #torchrun command sets the new env variables RANK, LOCAL_RANK, and WORLD_SIZE
-ddp = int(os.environ.get('RANK', -1)) != -1 #is this a ddp run
+ddp = int(os.environ.get('RANK', -1)) != -1
 if ddp:
-    #use of DDP atm demands CUDA, we set the device appropriately according to rank
-    assert torch.cuda.is_available(), "for now we need CUDA for DDP"
+    assert torch.cuda.is_available()
     init_process_group(backend='nccl')
     ddp_rank = int(os.environ['RANK'])
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
     ddp_world_size = int(os.environ['WORLD_SIZE'])
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
-    master_process = ddp_rank ==0 #this process will do logging, checkpointing etc.
-    
+    master_process = ddp_rank ==0
 else:
-    #vanila, non-DDP run
     ddp_rank=0
     ddp_local_rank=0
     ddp_world_size=1
     master_process=True
-    #auto detect device
-    device = "cpu"
-    if torch.cuda.is_available(): device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
-    print(f"using device: {device}")
-    wandb.log({"device": device})
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
 #pytorch issue to lookup for with autocast device changed to device_type
 device_type = "cuda" if device.startswith("cuda") else "cpu"
@@ -476,7 +535,7 @@ if torch.cuda.is_available():
 
 enc = tiktoken.get_encoding("gpt2")
 
-total_batch_size =524288 #32768 #2**19 #~0.5M tokens
+total_batch_size =32768#524288 #32768 #2**19 #~0.5M tokens
 B = 32
 T = 1024
 assert total_batch_size % (B *T * ddp_world_size) ==0, "make sure its divisible by B*T"
@@ -486,7 +545,7 @@ grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
 total_dataset_tokens = 1_000_000_000  # 1B tokens
 iterations_per_epoch = total_dataset_tokens // total_batch_size
 
-max_steps = 1907 #19073 #1907
+max_steps = 19073
 num_epochs = max_steps / iterations_per_epoch
 
 if master_process:
@@ -545,9 +604,8 @@ wandb.log({"num_of_parameters": num_of_parameters})
 #learning rate scheduler
 max_lr = 6e-4
 min_lr = max_lr*0.1
-warm_up_steps = 71 #715
-max_steps = 1907
-#max_steps = 19073
+warm_up_steps = 715
+max_steps = 19073
 
 # Add additional training hyperparameters not in GPTConfig
 wandb.config.update({
@@ -576,7 +634,45 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 #optimizer
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
+#optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
+
+# Optimizer 1: AdamW for embeddings
+optimizer1 = torch.optim.AdamW(
+    [raw_model.transformer.wte.weight, raw_model.transformer.wpe.weight],
+    lr=6e-4, betas=(0.9, 0.95), eps=1e-8,
+    fused=True if device_type == "cuda" else False
+)
+
+# Optimizer 2: AdamW for lm_head
+optimizer2 = torch.optim.AdamW(
+    [raw_model.lm_head.weight],
+    lr=6e-4, betas=(0.9, 0.95), eps=1e-8,
+    fused=True if device_type == "cuda" else False
+)
+
+# Optimizer 3: Muon for 2D matrices
+params = list(raw_model.transformer.h.parameters())
+matrix_params = [p for p in params if p.ndim == 2]
+scalar_params = [p for p in params if p.ndim < 2]
+scalar_params.extend(list(raw_model.transformer.ln_f.parameters()))
+
+optimizer3 = Muon(matrix_params, lr=0.02, momentum=0.95, nesterov=True,
+                  backend='newtonschulz5', backend_steps=5)
+
+# Optimizer 4: AdamW for scalars
+optimizer4 = torch.optim.AdamW(scalar_params, lr=6e-4, betas=(0.9, 0.95), 
+                                eps=1e-8, fused=True if device_type == "cuda" else False)
+
+optimizers = [optimizer1, optimizer2, optimizer3, optimizer4]
+schedulers = [torch.optim.lr_scheduler.LambdaLR(opt, get_lr) for opt in optimizers]
+
+if master_process:
+    print(f"Optimizer 1 (embeddings): {sum(p.numel() for p in [raw_model.transformer.wte.weight, raw_model.transformer.wpe.weight]):,}")
+    print(f"Optimizer 2 (lm_head): {sum(p.numel() for p in [raw_model.lm_head.weight]):,}")
+    print(f"Optimizer 3 (Muon matrices): {sum(p.numel() for p in matrix_params):,}")
+    print(f"Optimizer 4 (scalars): {sum(p.numel() for p in scalar_params):,}")
+
+
 
 #create the log directory we will write checkpoints to log to
 log_dir = "log"
@@ -599,7 +695,12 @@ if checkpoint_files:
     # Load checkpoint
     checkpoint = torch.load(latest_ckpt, map_location=device, weights_only=False)
     raw_model.load_state_dict(checkpoint['model'])
-    optimizer.load_state_dict(checkpoint['optimizer'])
+
+    # Load all optimizer states
+    for opt, opt_state in zip(optimizers, checkpoint['optimizers']):
+        opt.load_state_dict(opt_state)
+
+    #optimizer.load_state_dict(checkpoint['optimizer'])
 
     # Simply reset the seed
     seed = checkpoint.get('seed', 1337)
@@ -630,7 +731,7 @@ for step in range(start_step, max_steps):
     last_step = (step == max_steps -1)
 
     #once in a while evaluator our evaluation loss
-    if step %100 ==0 or last_step:
+    if step %500 ==0 or last_step:
         model.eval()
         val_dataloader.reset()
         with torch.no_grad():
@@ -654,12 +755,13 @@ for step in range(start_step, max_steps):
                 "step": step,
                 "val": val_loss_accum.item()
                 })
-            if step > 0 and (step % 500 == 0 or last_step):
+            if step > 0 and (step % 1000 == 0 or last_step):
                 #optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
                     'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(), #add optimizer state for later resuming training
+                    #'optimizer': optimizer.state_dict(), #add optimizer state for later resuming training
+                    'optimizers': [opt.state_dict() for opt in optimizers],
                     'config': raw_model.config,
                     'step': step,
                     'val_loss': val_loss_accum.item(),
@@ -675,7 +777,7 @@ for step in range(start_step, max_steps):
 
                 
     #once in a while evalute hellaSwag
-    if (step %100 ==0 or last_step):# and (not use_compile):
+    if (step %500 ==0 or last_step):# and (not use_compile):
         num_correct_norm = 0
         num_total = 0
         for i,example in enumerate(iterate_examples("val")):
@@ -717,7 +819,7 @@ for step in range(start_step, max_steps):
     #if you disable torch.compile, this code works fine
 
     
-    if ((step >0 and step %100 ==0) or last_step):# and (not use_compile):
+    if ((step >0 and step %500 ==0) or last_step):# and (not use_compile):
         model.eval()
         num_return_sequence = 4
         max_length = 32
@@ -798,7 +900,11 @@ for step in range(start_step, max_steps):
     #training loop
     #do one step of optimization
     model.train()
-    optimizer.zero_grad()
+    #optimizer.zero_grad()
+    # NEW CODE - Zero grad for all optimizers:
+    for opt in optimizers:
+        opt.zero_grad()
+
     loss_accum = 0.0
     for micro_step_batch in range(grad_accum_steps):
         x,y = train_dataloader.next_batch()
@@ -820,28 +926,48 @@ for step in range(start_step, max_steps):
     if ddp: 
         dist.all_reduce(loss_accum, op = dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+    # NEW CODE - Add Muon momentum warmup:
+    frac = min(step / 300, 1)
+    optimizer3.param_groups[0]['momentum'] = (1 - frac) * 0.85 + frac * 0.95
+
     #determine and set the learning rate for the iteration
-    lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-    optimizer.step()
+    # lr = get_lr(step)
+    # for param_group in optimizer.param_groups:
+    #     param_group['lr'] = lr
+    # optimizer.step()
+
+    for opt, sched in zip(optimizers, schedulers):
+        opt.step()
+        sched.step()
+
     if device_type=="cuda":
         torch.cuda.synchronize()
+
     t1=time.time()
     dt= (t1-t0) #in diff in seconds
     tokens_processed = train_dataloader.B * train_dataloader.T * grad_accum_steps * ddp_world_size
     tokens_per_sec = tokens_processed/ dt
     if master_process:
-        print(f"step {step:4d}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, dt: {dt*1000:.2f}ms, token/sec throughput: {tokens_per_sec:.2f}") #calling .item() here ships the float to cpu, if gpu loss will be in gpu then .item() makes a copy to cpu to print
-        wandb.log({
+        # NEW CODE - Get learning rates for better logging:
+    lr_adamw = optimizers[0].param_groups[0]['lr']
+    lr_muon = optimizers[2].param_groups[0]['lr']
+    muon_momentum = optimizers[2].param_groups[0]['momentum']
+    
+    print(f"step {step:4d}, loss: {loss_accum.item():.6f}, lr_adamw: {lr_adamw:.4e}, lr_muon: {lr_muon:.4e}, momentum: {muon_momentum:.3f}, norm: {norm:.4f}, dt: {dt*1000:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+    
+    wandb.log({
         "train_loss": loss_accum.item(),
-        "learning_rate": lr,
+        "learning_rate_adamw": lr_adamw,
+        "learning_rate_muon": lr_muon,
+        "muon_momentum": muon_momentum,
         "grad_norm": norm,
         "tokens_per_sec": tokens_per_sec,
         "step": step
     })
-        with open(log_file, "a") as f:
-            f.write(f"{step} train {loss_accum.item():.6f}\n")
+    
+    with open(log_file, "a") as f:
+        f.write(f"{step} train {loss_accum.item():.6f}\n")
         
         # Log to W&B as usual
         wandb.log({
